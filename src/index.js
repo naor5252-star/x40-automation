@@ -13,8 +13,19 @@ export class PresenceState {
     }
 
     if (path === "/status") {
-      const state = await this.getState();
-      return Response.json(state);
+      return Response.json(await this.getState());
+    }
+
+    if (path === "/trigger-test" && request.method === "POST") {
+      let body = {};
+      try { body = await request.json(); } catch {}
+      const shortcutName = body.shortcut_name || this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק";
+      const result = await this.dispatchGitHub(shortcutName, "run");
+      return Response.json({
+        action: "github_test_dispatched",
+        shortcutName,
+        github: result,
+      });
     }
 
     const m = path.match(/^\/presence\/(naor|wife)$/);
@@ -69,12 +80,60 @@ export class PresenceState {
       hour12: false,
     }).formatToParts(new Date());
 
-    const x = Object.fromEntries(parts.map(p => [p.type, p.value]));
+    const x = Object.fromEntries(parts.map((p) => [p.type, p.value]));
+
     return {
       date: `${x.year}-${x.month}-${x.day}`,
       time: `${x.hour}:${x.minute}:${x.second}`,
       hour: Number(x.hour),
       minute: Number(x.minute),
+    };
+  }
+
+  async dispatchGitHub(shortcutName, mode = "run") {
+    const owner = this.env.GITHUB_OWNER;
+    const repo = this.env.GITHUB_REPO;
+    const workflow = this.env.GITHUB_WORKFLOW || "dreame.yml";
+    const ref = this.env.GITHUB_REF || "main";
+    const token = this.env.GITHUB_DISPATCH_TOKEN;
+
+    if (!owner || !repo || !token) {
+      throw new Error("Missing GITHUB_OWNER, GITHUB_REPO, or GITHUB_DISPATCH_TOKEN");
+    }
+
+    const endpoint =
+      `https://api.github.com/repos/${encodeURIComponent(owner)}` +
+      `/${encodeURIComponent(repo)}/actions/workflows/${encodeURIComponent(workflow)}/dispatches`;
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${token}`,
+        "Accept": "application/vnd.github+json",
+        "X-GitHub-Api-Version": "2022-11-28",
+        "User-Agent": "dreame-x40-cloudflare-worker",
+        "Content-Type": "application/json",
+      },
+      body: JSON.stringify({
+        ref,
+        inputs: {
+          mode,
+          shortcut_name: shortcutName,
+        },
+      }),
+    });
+
+    const text = await response.text();
+
+    if (!response.ok) {
+      throw new Error(`GitHub workflow dispatch failed: ${response.status} ${text}`);
+    }
+
+    return {
+      ok: true,
+      status: response.status,
+      workflow,
+      ref,
     };
   }
 
@@ -105,39 +164,35 @@ export class PresenceState {
       return { ...result, state };
     }
 
-    // Stage 1 = dry run. Stage 2 will replace this with a call to the
-    // Dreame cloud adapter / Cloudflare Container.
     if (this.env.DRY_RUN !== "false") {
-      await this.ctx.storage.put("lastRunDate", now.date);
-      return { ...result, action: "dry_run_would_start_dreame", state };
+      return {
+        ...result,
+        action: "dry_run_would_dispatch_github",
+        shortcutName: this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
+        state,
+      };
     }
 
-    if (!this.env.DREAME_TRIGGER_URL) {
-      return { ...result, action: "blocked_missing_DREAME_TRIGGER_URL", state };
-    }
+    const shortcutName = this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק";
+    const github = await this.dispatchGitHub(shortcutName, "run");
 
-    const response = await fetch(this.env.DREAME_TRIGGER_URL, {
-      method: "POST",
-      headers: {
-        "Authorization": `Bearer ${this.env.DREAME_TRIGGER_TOKEN ?? ""}`,
-        "Content-Type": "application/json",
-      },
-      body: JSON.stringify({ command: "start_clean" }),
-    });
-
-    if (!response.ok) {
-      const text = await response.text();
-      throw new Error(`Dreame trigger failed: ${response.status} ${text}`);
-    }
-
+    // Mark the day only after GitHub accepted the dispatch.
     await this.ctx.storage.put("lastRunDate", now.date);
-    return { ...result, action: "dreame_started", state };
+
+    return {
+      ...result,
+      action: "github_workflow_dispatched",
+      shortcutName,
+      github,
+      state,
+    };
   }
 }
 
 export default {
   async fetch(request, env) {
     const token = request.headers.get("X-Webhook-Token");
+
     if (!env.WEBHOOK_TOKEN || token !== env.WEBHOOK_TOKEN) {
       return new Response("Unauthorized", { status: 401 });
     }

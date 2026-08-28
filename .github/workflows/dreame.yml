@@ -1,0 +1,48 @@
+name: Dreame X40 Shortcut
+
+on:
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: "list = only show shortcuts; run = start a shortcut"
+        required: true
+        default: "list"
+        type: choice
+        options:
+          - list
+          - run
+      shortcut_name:
+        description: "Dreame shortcut name"
+        required: true
+        default: "ניקוי עמוק"
+        type: string
+
+permissions:
+  contents: read
+
+jobs:
+  dreame:
+    name: Dreame Cloud
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup Node 24
+        uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+
+      - name: Install Dreame client
+        run: npm install --no-save node-dreame@0.5.0
+
+      - name: Login, discover shortcut, and optionally run it
+        env:
+          DREAME_EMAIL: ${{ secrets.DREAME_EMAIL }}
+          DREAME_PASSWORD: ${{ secrets.DREAME_PASSWORD }}
+          DREAME_REGION: ${{ vars.DREAME_REGION || 'eu' }}
+          DREAME_DEVICE_DID: ${{ vars.DREAME_DEVICE_DID }}
+          DREAME_SHORTCUT_NAME: ${{ inputs.shortcut_name }}
+        run: node scripts/dreame.mjs "${{ inputs.mode }}" "${{ inputs.shortcut_name }}"
