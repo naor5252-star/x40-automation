@@ -8,7 +8,9 @@ export class PresenceState {
     const url = new URL(request.url);
 
     if (url.pathname === "/status") {
-      return Response.json(await this.getState());
+      return Response.json(await this.getState(), {
+        headers: { "Cache-Control": "no-store" },
+      });
     }
 
     if (url.pathname === "/check") {
@@ -213,8 +215,23 @@ export class PresenceState {
 
 export default {
   async fetch(request, env) {
-    const token = request.headers.get("X-Webhook-Token");
-    if (!env.WEBHOOK_TOKEN || token !== env.WEBHOOK_TOKEN) {
+    const url = new URL(request.url);
+
+    const webhookToken = request.headers.get("X-Webhook-Token");
+    const widgetToken = request.headers.get("X-Widget-Token");
+
+    const webhookAuthorized =
+      Boolean(env.WEBHOOK_TOKEN) &&
+      webhookToken === env.WEBHOOK_TOKEN;
+
+    // Read-only token: valid ONLY for GET /status.
+    const widgetAuthorized =
+      request.method === "GET" &&
+      url.pathname === "/status" &&
+      Boolean(env.WIDGET_TOKEN) &&
+      widgetToken === env.WIDGET_TOKEN;
+
+    if (!webhookAuthorized && !widgetAuthorized) {
       return new Response("Unauthorized", { status: 401 });
     }
 
