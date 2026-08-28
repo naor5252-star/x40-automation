@@ -4,7 +4,7 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "capture = discover ID via MQTT; run-id = start by ID"
+        description: "Dreame / Telegram operation"
         required: true
         default: "capture"
         type: choice
@@ -12,6 +12,8 @@ on:
           - capture
           - list
           - run-id
+          - telegram-find-chat
+          - telegram-test
       shortcut_name:
         description: "Dreame shortcut name"
         required: true
@@ -30,7 +32,7 @@ jobs:
   dreame:
     name: Dreame Cloud
     runs-on: ubuntu-latest
-    timeout-minutes: 5
+    timeout-minutes: 7
 
     steps:
       - name: Checkout
@@ -44,7 +46,7 @@ jobs:
       - name: Install Dreame client
         run: npm install --no-save node-dreame@0.5.0
 
-      - name: Dreame shortcut operation
+      - name: Dreame / Telegram operation
         env:
           DREAME_EMAIL: ${{ secrets.DREAME_EMAIL }}
           DREAME_PASSWORD: ${{ secrets.DREAME_PASSWORD }}
@@ -53,4 +55,43 @@ jobs:
           DREAME_CAPTURE_SECONDS: ${{ vars.DREAME_CAPTURE_SECONDS || '150' }}
           DREAME_SHORTCUT_NAME: ${{ inputs.shortcut_name }}
           DREAME_SHORTCUT_ID: ${{ inputs.shortcut_id }}
-        run: node scripts/dreame.mjs "${{ inputs.mode }}" "${{ inputs.shortcut_name }}" "${{ inputs.shortcut_id }}"
+
+          TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
+          TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
+          TELEGRAM_WATCH_SECONDS: ${{ vars.TELEGRAM_WATCH_SECONDS || '75' }}
+
+        shell: bash
+        run: |
+          set -e
+
+          MODE="${{ inputs.mode }}"
+          SHORTCUT_NAME="${{ inputs.shortcut_name }}"
+          SHORTCUT_ID="${{ inputs.shortcut_id }}"
+
+          if [ "$MODE" = "telegram-find-chat" ]; then
+            node scripts/telegram.mjs telegram-find-chat
+            exit 0
+          fi
+
+          if [ "$MODE" = "telegram-test" ]; then
+            node scripts/telegram.mjs telegram-test
+            exit 0
+          fi
+
+          if [ "$MODE" = "run-id" ]; then
+            # Start MQTT watcher BEFORE sending the cleaning command.
+            node scripts/telegram.mjs watch &
+            WATCH_PID=$!
+
+            # Give MQTT a moment to subscribe.
+            sleep 2
+
+            # This script already treats Dreame 80001/no-ACK as non-fatal.
+            node scripts/dreame.mjs "$MODE" "$SHORTCUT_NAME" "$SHORTCUT_ID"
+
+            # Keep the job alive until start is confirmed or watcher times out.
+            wait "$WATCH_PID" || true
+            exit 0
+          fi
+
+          node scripts/dreame.mjs "$MODE" "$SHORTCUT_NAME" "$SHORTCUT_ID"
