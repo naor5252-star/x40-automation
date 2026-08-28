@@ -5,7 +5,7 @@ const wantedName = (process.argv.slice(3).join(" ") || process.env.DREAME_SHORTC
 
 const email = process.env.DREAME_EMAIL;
 const password = process.env.DREAME_PASSWORD;
-const region = process.env.DREAME_REGION || "eu";
+const configuredRegion = (process.env.DREAME_REGION || "auto").trim().toLowerCase();
 const wantedDid = (process.env.DREAME_DEVICE_DID || "").trim();
 
 if (!email || !password) {
@@ -18,6 +18,8 @@ if (!["list", "run"].includes(mode)) {
   process.exit(2);
 }
 
+const ALL_REGIONS = ["sg", "eu", "de", "us", "in", "ru", "tw", "cn"];
+
 function normalize(s) {
   return String(s ?? "")
     .normalize("NFKC")
@@ -29,10 +31,12 @@ function normalize(s) {
 function decodeShortcutName(value) {
   if (typeof value !== "string") return String(value ?? "");
   try {
-    return Buffer.from(value, "base64").toString("utf8");
-  } catch {
-    return value;
-  }
+    const decoded = Buffer.from(value, "base64").toString("utf8");
+    // Base64 decoding any string can technically "succeed"; prefer decoded
+    // only when it contains printable content.
+    if (decoded && !decoded.includes("\uFFFD")) return decoded;
+  } catch {}
+  return value;
 }
 
 function parseShortcuts(raw) {
@@ -53,6 +57,54 @@ function parseShortcuts(raw) {
     ...sc,
     decodedName: decodeShortcutName(sc.name),
   }));
+}
+
+async function discoverClientAndDevices() {
+  const regions = configuredRegion === "auto" ? ALL_REGIONS : [configuredRegion];
+
+  console.log(`Region mode: ${configuredRegion}`);
+  console.log(`Regions to try: ${regions.join(", ")}`);
+
+  const failures = [];
+
+  for (const region of regions) {
+    console.log(`\n=== Trying Dreame region: ${region} ===`);
+    try {
+      const client = new DreameClient({ email, password, region });
+      await client.login();
+      const devices = await client.getDevices({ timeoutMs: 25000 });
+
+      console.log(`Region ${region}: ${devices.length} device(s)`);
+
+      if (devices.length > 0) {
+        console.log(`✅ Found Dreame device(s) in region "${region}"`);
+        return { client, devices, region };
+      }
+
+      failures.push(`${region}: login OK, 0 devices`);
+    } catch (err) {
+      const msg = err?.message || String(err);
+      console.warn(`Region ${region}: ${msg}`);
+      failures.push(`${region}: ${msg}`);
+    }
+
+    // Small pause to avoid hammering Dreame auth endpoints.
+    await new Promise((r) => setTimeout(r, 1200));
+  }
+
+  console.error("\n❌ No devices found in any attempted Dreame region.");
+  console.error("Results:");
+  failures.forEach((x) => console.error(`  - ${x}`));
+  console.error(`
+If Dreamehome shows the X40 but every region returns 0 devices:
+1. Make sure DREAME_EMAIL is the SAME Dreamehome account that owns/sees the robot.
+2. If the account was created with "Sign in with Apple" or Google, set a
+   Dreame password in Dreamehome Account & Security, then use that exact
+   account email + password in GitHub Secrets.
+3. Do not create a second email/password account just for this automation,
+   because it can authenticate successfully while owning zero devices.
+`);
+  process.exit(4);
 }
 
 async function readShortcutsWithRetry(client, did) {
@@ -85,39 +137,28 @@ async function readShortcutsWithRetry(client, did) {
   throw lastErr;
 }
 
-const client = new DreameClient({
-  email,
-  password,
-  region,
-});
-
-console.log(`Logging in to DreameHome (${region})...`);
-await client.login();
-
-const devices = await client.getDevices({ timeoutMs: 25000 });
-if (!devices.length) {
-  throw new Error("No Dreame devices were returned by the account.");
-}
+const { client, devices, region } = await discoverClientAndDevices();
 
 console.log("\nDevices:");
 devices.forEach((d, i) => {
-  console.log(`[${i}] did=${d.did} model=${d.model ?? ""} name=${d.name ?? d.customName ?? ""}`);
+  console.log(`[${i}] did=${d.did} model=${d.model ?? ""} name=${d.name ?? ""} online=${d.online}`);
 });
 
 let device;
 
 if (wantedDid) {
   device = devices.find((d) => String(d.did) === wantedDid);
-  if (!device) throw new Error(`DREAME_DEVICE_DID=${wantedDid} was not found in the account.`);
+  if (!device) throw new Error(`DREAME_DEVICE_DID=${wantedDid} was not found in region ${region}.`);
 } else {
   device =
-    devices.find((d) => String(d.model ?? "").includes("r2449")) ||
-    devices.find((d) => /x40/i.test(String(d.name ?? d.customName ?? ""))) ||
+    devices.find((d) => /r2449/i.test(String(d.model ?? ""))) ||
+    devices.find((d) => /x40/i.test(String(d.name ?? ""))) ||
     devices.find((d) => String(d.model ?? "").startsWith("dreame.vacuum.")) ||
     devices[0];
 }
 
-console.log(`\nSelected device: did=${device.did} model=${device.model ?? ""} name=${device.name ?? device.customName ?? ""}`);
+console.log(`\n✅ Selected region: ${region}`);
+console.log(`Selected device: did=${device.did} model=${device.model ?? ""} name=${device.name ?? ""}`);
 
 const shortcuts = await readShortcutsWithRetry(client, device.did);
 
@@ -127,18 +168,18 @@ for (const sc of shortcuts) {
 }
 
 if (mode === "list") {
-  console.log("\nLIST mode completed. Robot was NOT started.");
+  console.log("\n✅ LIST mode completed. Robot was NOT started.");
   process.exit(0);
 }
 
 const wanted = normalize(wantedName);
-
 let target = shortcuts.find((sc) => normalize(sc.decodedName) === wanted);
 
 if (!target) {
-  const partial = shortcuts.filter((sc) =>
-    normalize(sc.decodedName).includes(wanted) || wanted.includes(normalize(sc.decodedName))
-  );
+  const partial = shortcuts.filter((sc) => {
+    const n = normalize(sc.decodedName);
+    return n.includes(wanted) || wanted.includes(n);
+  });
   if (partial.length === 1) target = partial[0];
 }
 
