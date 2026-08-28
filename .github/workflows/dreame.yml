@@ -4,17 +4,23 @@ on:
   workflow_dispatch:
     inputs:
       mode:
-        description: "list = show shortcuts only; run = start shortcut"
+        description: "capture = discover ID via MQTT; run-id = start by ID"
         required: true
-        default: "list"
+        default: "capture"
         type: choice
         options:
+          - capture
           - list
-          - run
+          - run-id
       shortcut_name:
         description: "Dreame shortcut name"
         required: true
         default: "ניקוי עמוק"
+        type: string
+      shortcut_id:
+        description: "Required only for run-id"
+        required: false
+        default: ""
         type: string
 
 permissions:
@@ -24,7 +30,7 @@ jobs:
   dreame:
     name: Dreame Cloud
     runs-on: ubuntu-latest
-    timeout-minutes: 10
+    timeout-minutes: 5
 
     steps:
       - name: Checkout
@@ -38,11 +44,13 @@ jobs:
       - name: Install Dreame client
         run: npm install --no-save node-dreame@0.5.0
 
-      - name: Auto-detect Dreame region, discover shortcut, optionally run
+      - name: Dreame shortcut operation
         env:
           DREAME_EMAIL: ${{ secrets.DREAME_EMAIL }}
           DREAME_PASSWORD: ${{ secrets.DREAME_PASSWORD }}
-          DREAME_REGION: ${{ vars.DREAME_REGION || 'auto' }}
+          DREAME_REGION: ${{ vars.DREAME_REGION || 'sg' }}
           DREAME_DEVICE_DID: ${{ vars.DREAME_DEVICE_DID }}
+          DREAME_CAPTURE_SECONDS: ${{ vars.DREAME_CAPTURE_SECONDS || '150' }}
           DREAME_SHORTCUT_NAME: ${{ inputs.shortcut_name }}
-        run: node scripts/dreame.mjs "${{ inputs.mode }}" "${{ inputs.shortcut_name }}"
+          DREAME_SHORTCUT_ID: ${{ inputs.shortcut_id }}
+        run: node scripts/dreame.mjs "${{ inputs.mode }}" "${{ inputs.shortcut_name }}" "${{ inputs.shortcut_id }}"

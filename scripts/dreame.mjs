@@ -1,24 +1,18 @@
 import { DreameClient } from "node-dreame";
 
-const mode = (process.argv[2] || "list").trim().toLowerCase();
-const wantedName = (process.argv.slice(3).join(" ") || process.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק").trim();
+const mode = (process.argv[2] || "capture").trim().toLowerCase();
+const wantedName = (process.argv[3] || process.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק").trim();
+const argShortcutId = (process.argv[4] || process.env.DREAME_SHORTCUT_ID || "").trim();
 
 const email = process.env.DREAME_EMAIL;
 const password = process.env.DREAME_PASSWORD;
-const configuredRegion = (process.env.DREAME_REGION || "auto").trim().toLowerCase();
+const configuredRegion = (process.env.DREAME_REGION || "sg").trim().toLowerCase();
 const wantedDid = (process.env.DREAME_DEVICE_DID || "").trim();
+const captureSeconds = Math.max(30, Number(process.env.DREAME_CAPTURE_SECONDS || "150"));
 
 if (!email || !password) {
-  console.error("Missing DREAME_EMAIL or DREAME_PASSWORD");
-  process.exit(2);
+  throw new Error("Missing DREAME_EMAIL or DREAME_PASSWORD");
 }
-
-if (!["list", "run"].includes(mode)) {
-  console.error(`Unknown mode "${mode}". Use: list | run`);
-  process.exit(2);
-}
-
-const ALL_REGIONS = ["sg", "eu", "de", "us", "in", "ru", "tw", "cn"];
 
 function normalize(s) {
   return String(s ?? "")
@@ -31,9 +25,8 @@ function normalize(s) {
 function decodeShortcutName(value) {
   if (typeof value !== "string") return String(value ?? "");
   try {
-    const decoded = Buffer.from(value, "base64").toString("utf8");
-    // Base64 decoding any string can technically "succeed"; prefer decoded
-    // only when it contains printable content.
+    const buf = Buffer.from(value, "base64");
+    const decoded = buf.toString("utf8");
     if (decoded && !decoded.includes("\uFFFD")) return decoded;
   } catch {}
   return value;
@@ -41,165 +34,214 @@ function decodeShortcutName(value) {
 
 function parseShortcuts(raw) {
   let value = raw;
-  if (typeof value === "string") {
-    try {
-      value = JSON.parse(value);
-    } catch (e) {
-      throw new Error(`Property 4-48 is not valid JSON: ${String(e)}`);
-    }
-  }
-
+  if (typeof value === "string") value = JSON.parse(value);
   if (!Array.isArray(value)) {
     throw new Error(`Unexpected 4-48 payload: ${JSON.stringify(value).slice(0, 500)}`);
   }
-
   return value.map((sc) => ({
     ...sc,
     decodedName: decodeShortcutName(sc.name),
   }));
 }
 
-async function discoverClientAndDevices() {
-  const regions = configuredRegion === "auto" ? ALL_REGIONS : [configuredRegion];
-
-  console.log(`Region mode: ${configuredRegion}`);
-  console.log(`Regions to try: ${regions.join(", ")}`);
-
-  const failures = [];
+async function connect() {
+  const regions = configuredRegion === "auto"
+    ? ["sg", "eu", "de", "us", "in", "ru", "tw", "cn"]
+    : [configuredRegion];
 
   for (const region of regions) {
-    console.log(`\n=== Trying Dreame region: ${region} ===`);
+    console.log(`Trying region ${region}...`);
     try {
       const client = new DreameClient({ email, password, region });
       await client.login();
       const devices = await client.getDevices({ timeoutMs: 25000 });
-
       console.log(`Region ${region}: ${devices.length} device(s)`);
-
-      if (devices.length > 0) {
-        console.log(`✅ Found Dreame device(s) in region "${region}"`);
-        return { client, devices, region };
-      }
-
-      failures.push(`${region}: login OK, 0 devices`);
-    } catch (err) {
-      const msg = err?.message || String(err);
-      console.warn(`Region ${region}: ${msg}`);
-      failures.push(`${region}: ${msg}`);
-    }
-
-    // Small pause to avoid hammering Dreame auth endpoints.
-    await new Promise((r) => setTimeout(r, 1200));
-  }
-
-  console.error("\n❌ No devices found in any attempted Dreame region.");
-  console.error("Results:");
-  failures.forEach((x) => console.error(`  - ${x}`));
-  console.error(`
-If Dreamehome shows the X40 but every region returns 0 devices:
-1. Make sure DREAME_EMAIL is the SAME Dreamehome account that owns/sees the robot.
-2. If the account was created with "Sign in with Apple" or Google, set a
-   Dreame password in Dreamehome Account & Security, then use that exact
-   account email + password in GitHub Secrets.
-3. Do not create a second email/password account just for this automation,
-   because it can authenticate successfully while owning zero devices.
-`);
-  process.exit(4);
-}
-
-async function readShortcutsWithRetry(client, did) {
-  let lastErr;
-  for (let attempt = 1; attempt <= 4; attempt++) {
-    try {
-      console.log(`Reading Dreame shortcuts (4-48), attempt ${attempt}/4...`);
-      const result = await client.getProperties(
-        String(did),
-        [{ siid: 4, piid: 48 }],
-        { timeoutMs: 25000 }
-      );
-
-      const prop = result.find((x) => x.siid === 4 && x.piid === 48) ?? result[0];
-      if (!prop) throw new Error("No result returned for property 4-48.");
-      if (prop.code && prop.code !== 0) throw new Error(`Dreame property 4-48 returned code ${prop.code}.`);
-      if (prop.value === undefined || prop.value === null) throw new Error("Property 4-48 returned no value.");
-
-      return parseShortcuts(prop.value);
-    } catch (err) {
-      lastErr = err;
-      console.warn(`Attempt ${attempt} failed: ${err?.message || err}`);
-      if (attempt < 4) {
-        const waitMs = attempt * 4000;
-        console.log(`Waiting ${waitMs / 1000}s before retry...`);
-        await new Promise((r) => setTimeout(r, waitMs));
-      }
+      if (devices.length) return { client, devices, region };
+    } catch (e) {
+      console.log(`Region ${region} failed: ${e?.message || e}`);
     }
   }
-  throw lastErr;
+  throw new Error("No Dreame devices found.");
 }
 
-const { client, devices, region } = await discoverClientAndDevices();
+const { client, devices, region } = await connect();
 
 console.log("\nDevices:");
-devices.forEach((d, i) => {
-  console.log(`[${i}] did=${d.did} model=${d.model ?? ""} name=${d.name ?? ""} online=${d.online}`);
-});
+devices.forEach((d, i) =>
+  console.log(`[${i}] did=${d.did} model=${d.model} name=${d.name} online=${d.online}`)
+);
 
 let device;
-
 if (wantedDid) {
   device = devices.find((d) => String(d.did) === wantedDid);
-  if (!device) throw new Error(`DREAME_DEVICE_DID=${wantedDid} was not found in region ${region}.`);
 } else {
   device =
-    devices.find((d) => /r2449/i.test(String(d.model ?? ""))) ||
-    devices.find((d) => /x40/i.test(String(d.name ?? ""))) ||
-    devices.find((d) => String(d.model ?? "").startsWith("dreame.vacuum.")) ||
+    devices.find((d) => /r2416|r2449/i.test(String(d.model))) ||
+    devices.find((d) => /x40/i.test(String(d.name))) ||
+    devices.find((d) => String(d.model).startsWith("dreame.vacuum.")) ||
     devices[0];
 }
+if (!device) throw new Error("Could not select Dreame device.");
 
-console.log(`\n✅ Selected region: ${region}`);
-console.log(`Selected device: did=${device.did} model=${device.model ?? ""} name=${device.name ?? ""}`);
+console.log(`\n✅ Region: ${region}`);
+console.log(`✅ Device: ${device.name} | ${device.model} | did=${device.did}`);
 
-const shortcuts = await readShortcutsWithRetry(client, device.did);
+async function printAndFind(raw, source) {
+  const shortcuts = parseShortcuts(raw);
+  console.log(`\nShortcuts captured from ${source}:`);
+  for (const sc of shortcuts) {
+    console.log(`  id=${sc.id} | state=${sc.state ?? "?"} | ${sc.decodedName}`);
+  }
 
-console.log("\nDreame shortcuts:");
-for (const sc of shortcuts) {
-  console.log(`  ${sc.id} -> ${sc.decodedName}`);
+  const wanted = normalize(wantedName);
+  let target = shortcuts.find((sc) => normalize(sc.decodedName) === wanted);
+  if (!target) {
+    const partial = shortcuts.filter((sc) => {
+      const n = normalize(sc.decodedName);
+      return n.includes(wanted) || wanted.includes(n);
+    });
+    if (partial.length === 1) target = partial[0];
+  }
+
+  if (target) {
+    console.log("\n===============================================");
+    console.log(`✅ FOUND SHORTCUT: ${target.decodedName}`);
+    console.log(`✅ FOUND_SHORTCUT_ID=${target.id}`);
+    console.log("===============================================");
+    return target;
+  }
+
+  console.log(`Wanted shortcut "${wantedName}" not found in this payload.`);
+  return null;
 }
 
-if (mode === "list") {
-  console.log("\n✅ LIST mode completed. Robot was NOT started.");
-  process.exit(0);
-}
+if (mode === "capture") {
+  console.log(`
+CAPTURE MODE
+------------
+GitHub is now listening to the X40 over Dreame MQTT.
 
-const wanted = normalize(wantedName);
-let target = shortcuts.find((sc) => normalize(sc.decodedName) === wanted);
+During the next ${captureSeconds} seconds:
+1. Open Dreamehome on your iPhone.
+2. Open the X40 shortcut list.
+3. Start "${wantedName}" once manually.
+4. As soon as the robot reacts, you may stop/pause it in the app.
 
-if (!target) {
-  const partial = shortcuts.filter((sc) => {
-    const n = normalize(sc.decodedName);
-    return n.includes(wanted) || wanted.includes(n);
+We are looking specifically for an MQTT properties_changed event:
+  siid=4, piid=48
+`);
+
+  const sub = await client.subscribe(device);
+  console.log(`✅ MQTT connected. Topic: ${sub.topic}`);
+  console.log("👉 NOW trigger the shortcut in Dreamehome.");
+
+  let done = false;
+
+  const finish = async (code) => {
+    if (done) return;
+    done = true;
+    await sub.close().catch(() => {});
+    process.exit(code);
+  };
+
+  sub.on("properties", async (changes) => {
+    for (const p of changes) {
+      if (p.siid === 4 && p.piid === 48) {
+        console.log("\n🎯 Received property 4-48 via MQTT.");
+        try {
+          const target = await printAndFind(p.value, "MQTT 4-48");
+          if (target) await finish(0);
+        } catch (e) {
+          console.log(`Could not parse 4-48: ${e?.message || e}`);
+          console.log("Raw 4-48:", JSON.stringify(p.value));
+        }
+      }
+    }
   });
-  if (partial.length === 1) target = partial[0];
+
+  sub.on("error", (err) => {
+    console.log("MQTT error:", err?.message || err);
+  });
+
+  // Log only relevant raw MIoT messages, not the full potentially noisy stream.
+  sub.on("message", (msg) => {
+    const method = msg?.data?.method;
+    if (method === "properties_changed") {
+      const params = Array.isArray(msg?.data?.params) ? msg.data.params : [];
+      const interesting = params.filter((p) => p?.siid === 4 && p?.piid === 48);
+      if (interesting.length) {
+        console.log("Raw relevant MQTT event:", JSON.stringify({
+          method,
+          params: interesting,
+        }));
+      }
+    }
+  });
+
+  setTimeout(async () => {
+    if (done) return;
+    console.log(`
+❌ Capture timeout: no 4-48 update was received.
+
+Try again and, while the listener is running, either:
+- start "${wantedName}", or
+- edit that shortcut in Dreamehome, make a harmless change, save it,
+  then change it back after capture.
+
+Changing/saving a shortcut is more likely to force Dreame to publish 4-48.
+`);
+    await finish(5);
+  }, captureSeconds * 1000);
+
+} else if (mode === "list") {
+  console.log("\nLIST mode: trying HTTP property 4-48 once...");
+  try {
+    const result = await client.getProperties(
+      String(device.did),
+      [{ siid: 4, piid: 48 }],
+      { timeoutMs: 15000 }
+    );
+    const prop = result.find((x) => x.siid === 4 && x.piid === 48) ?? result[0];
+    if (!prop || prop.value == null) throw new Error("No 4-48 value returned.");
+    await printAndFind(prop.value, "HTTP 4-48");
+  } catch (e) {
+    console.log(`HTTP list failed: ${e?.message || e}`);
+    console.log('Use mode="capture" instead; 80001 is expected on some healthy Dreame devices.');
+    process.exit(6);
+  }
+
+} else if (mode === "run-id") {
+  if (!argShortcutId) {
+    throw new Error("run-id requires shortcut_id (workflow input or DREAME_SHORTCUT_ID).");
+  }
+
+  console.log(`\n▶️ Starting "${wantedName}" using shortcut id=${argShortcutId}`);
+
+  const action = {
+    siid: 4,
+    aiid: 1,
+    in: [
+      { piid: 1, value: 25 },
+      { piid: 10, value: String(argShortcutId) },
+    ],
+  };
+
+  try {
+    const result = await client.callAction(String(device.did), action, { timeoutMs: 20000 });
+    console.log("✅ Dreame ACK:", JSON.stringify(result));
+  } catch (e) {
+    const bodyCode = e?.body?.code;
+    if (bodyCode === 80001 || String(e?.message || "").includes("80001") || String(e?.name || "").includes("Offline")) {
+      console.log(`
+⚠️ Dreame returned 80001/no HTTP ACK.
+This does NOT prove the command failed. On these devices the command can execute
+while the cloud-side ACK waiter times out. Check the robot/Dreamehome state.
+`);
+      process.exit(0);
+    }
+    throw e;
+  }
+
+} else {
+  throw new Error(`Unknown mode "${mode}". Use capture | list | run-id`);
 }
-
-if (!target) {
-  console.error(`\nCould not uniquely find shortcut: "${wantedName}"`);
-  console.error("Available shortcuts are printed above.");
-  process.exit(3);
-}
-
-console.log(`\nStarting shortcut: "${target.decodedName}" (id=${target.id})`);
-
-const action = {
-  siid: 4,
-  aiid: 1,
-  in: [
-    { piid: 1, value: 25 },
-    { piid: 10, value: String(target.id) },
-  ],
-};
-
-const response = await client.callAction(String(device.did), action, { timeoutMs: 25000 });
-console.log("Dreame action response:", JSON.stringify(response));
-console.log(`\n✅ Command sent for shortcut "${target.decodedName}".`);

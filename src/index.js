@@ -6,29 +6,25 @@ export class PresenceState {
 
   async fetch(request) {
     const url = new URL(request.url);
-    const path = url.pathname;
 
-    if (path === "/check") {
-      return Response.json(await this.checkAndMaybeRun("scheduled_check"));
-    }
-
-    if (path === "/status") {
+    if (url.pathname === "/status") {
       return Response.json(await this.getState());
     }
 
-    if (path === "/trigger-test" && request.method === "POST") {
-      let body = {};
-      try { body = await request.json(); } catch {}
-      const shortcutName = body.shortcut_name || this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק";
-      const result = await this.dispatchGitHub(shortcutName, "run");
-      return Response.json({
-        action: "github_test_dispatched",
-        shortcutName,
-        github: result,
-      });
+    if (url.pathname === "/check") {
+      return Response.json(await this.checkAndMaybeRun("manual_check"));
     }
 
-    const m = path.match(/^\/presence\/(naor|wife)$/);
+    if (url.pathname === "/trigger-test" && request.method === "POST") {
+      const shortcutId = this.env.DREAME_SHORTCUT_ID;
+      if (!shortcutId) {
+        return Response.json({ error: "Missing DREAME_SHORTCUT_ID" }, { status: 400 });
+      }
+      const result = await this.dispatchGitHub(shortcutId);
+      return Response.json({ action: "github_test_dispatched", ...result });
+    }
+
+    const m = url.pathname.match(/^\/presence\/(naor|wife)$/);
     if (m && request.method === "POST") {
       let body;
       try {
@@ -46,31 +42,41 @@ export class PresenceState {
         updatedAt: new Date().toISOString(),
       });
 
-      const result = await this.checkAndMaybeRun("presence_update");
-      return Response.json(result);
+      return Response.json(await this.checkAndMaybeRun("presence_update"));
     }
 
     return new Response("Not found", { status: 404 });
   }
 
   async getState() {
-    const [naor, wife, lastRunDate] = await Promise.all([
+    const [naor, wife, runInfo] = await Promise.all([
       this.ctx.storage.get("presence:naor"),
       this.ctx.storage.get("presence:wife"),
-      this.ctx.storage.get("lastRunDate"),
+      this.ctx.storage.get("runInfo"),
     ]);
 
     return {
       naor: naor ?? { state: "unknown" },
       wife: wife ?? { state: "unknown" },
-      lastRunDate: lastRunDate ?? null,
-      israelTime: this.israelNow(),
+      runInfo: runInfo ?? null,
+      config: {
+        timezone: this.env.TIMEZONE || "Asia/Jerusalem",
+        startTime: this.env.START_TIME || "10:00",
+        endTime: this.env.END_TIME || "15:00",
+        awayDelayMinutes: Number(this.env.AWAY_DELAY_MINUTES || "10"),
+        maxRunsPerDay: Number(this.env.MAX_RUNS_PER_DAY || "1"),
+        dryRun: this.env.DRY_RUN !== "false",
+        shortcutName: this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
+        shortcutIdConfigured: Boolean(this.env.DREAME_SHORTCUT_ID),
+      },
+      localTime: this.localNow(),
     };
   }
 
-  israelNow() {
+  localNow() {
+    const timezone = this.env.TIMEZONE || "Asia/Jerusalem";
     const parts = new Intl.DateTimeFormat("en-CA", {
-      timeZone: "Asia/Jerusalem",
+      timeZone: timezone,
       year: "numeric",
       month: "2-digit",
       day: "2-digit",
@@ -81,16 +87,21 @@ export class PresenceState {
     }).formatToParts(new Date());
 
     const x = Object.fromEntries(parts.map((p) => [p.type, p.value]));
-
     return {
       date: `${x.year}-${x.month}-${x.day}`,
       time: `${x.hour}:${x.minute}:${x.second}`,
-      hour: Number(x.hour),
-      minute: Number(x.minute),
+      minuteOfDay: Number(x.hour) * 60 + Number(x.minute),
     };
   }
 
-  async dispatchGitHub(shortcutName, mode = "run") {
+  parseClock(value, fallback) {
+    const text = String(value || fallback);
+    const m = text.match(/^(\d{1,2}):(\d{2})$/);
+    if (!m) throw new Error(`Invalid time: ${text}`);
+    return Number(m[1]) * 60 + Number(m[2]);
+  }
+
+  async dispatchGitHub(shortcutId) {
     const owner = this.env.GITHUB_OWNER;
     const repo = this.env.GITHUB_REPO;
     const workflow = this.env.GITHUB_WORKFLOW || "dreame.yml";
@@ -98,7 +109,7 @@ export class PresenceState {
     const token = this.env.GITHUB_DISPATCH_TOKEN;
 
     if (!owner || !repo || !token) {
-      throw new Error("Missing GITHUB_OWNER, GITHUB_REPO, or GITHUB_DISPATCH_TOKEN");
+      throw new Error("Missing GitHub configuration.");
     }
 
     const endpoint =
@@ -108,8 +119,8 @@ export class PresenceState {
     const response = await fetch(endpoint, {
       method: "POST",
       headers: {
-        "Authorization": `Bearer ${token}`,
-        "Accept": "application/vnd.github+json",
+        Authorization: `Bearer ${token}`,
+        Accept: "application/vnd.github+json",
         "X-GitHub-Api-Version": "2022-11-28",
         "User-Agent": "dreame-x40-cloudflare-worker",
         "Content-Type": "application/json",
@@ -117,94 +128,102 @@ export class PresenceState {
       body: JSON.stringify({
         ref,
         inputs: {
-          mode,
-          shortcut_name: shortcutName,
+          mode: "run-id",
+          shortcut_name: this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
+          shortcut_id: String(shortcutId),
         },
       }),
     });
 
     const text = await response.text();
-
     if (!response.ok) {
-      throw new Error(`GitHub workflow dispatch failed: ${response.status} ${text}`);
+      throw new Error(`GitHub dispatch failed: ${response.status} ${text}`);
     }
 
-    return {
-      ok: true,
-      status: response.status,
-      workflow,
-      ref,
-    };
+    return { ok: true, status: response.status, shortcutId: String(shortcutId) };
   }
 
   async checkAndMaybeRun(reason) {
     const state = await this.getState();
-    const now = this.israelNow();
+    const now = this.localNow();
 
     const bothAway =
       state.naor?.state === "away" &&
       state.wife?.state === "away";
 
-    const inWindow =
-      (now.hour > 10 || (now.hour === 10 && now.minute >= 0)) &&
-      now.hour < 15;
+    const awayDelayMs = Number(this.env.AWAY_DELAY_MINUTES || "10") * 60 * 1000;
+    const nowMs = Date.now();
+    const naorAwayLongEnough =
+      state.naor?.state === "away" &&
+      Number.isFinite(Date.parse(state.naor.updatedAt)) &&
+      nowMs - Date.parse(state.naor.updatedAt) >= awayDelayMs;
+    const wifeAwayLongEnough =
+      state.wife?.state === "away" &&
+      Number.isFinite(Date.parse(state.wife.updatedAt)) &&
+      nowMs - Date.parse(state.wife.updatedAt) >= awayDelayMs;
 
-    const alreadyRanToday = state.lastRunDate === now.date;
+    const start = this.parseClock(this.env.START_TIME, "10:00");
+    const end = this.parseClock(this.env.END_TIME, "15:00");
+    const inWindow = now.minuteOfDay >= start && now.minuteOfDay < end;
+
+    const maxRuns = Number(this.env.MAX_RUNS_PER_DAY || "1");
+    const runInfo =
+      state.runInfo?.date === now.date
+        ? state.runInfo
+        : { date: now.date, count: 0 };
 
     const result = {
       reason,
       bothAway,
+      awayLongEnough: naorAwayLongEnough && wifeAwayLongEnough,
       inWindow,
-      alreadyRanToday,
-      israelTime: now,
+      runsToday: runInfo.count,
+      maxRunsPerDay: maxRuns,
+      localTime: now,
       action: "none",
     };
 
-    if (!bothAway || !inWindow || alreadyRanToday) {
-      return { ...result, state };
+    if (!bothAway || !naorAwayLongEnough || !wifeAwayLongEnough || !inWindow || runInfo.count >= maxRuns) {
+      return result;
+    }
+
+    if (!this.env.DREAME_SHORTCUT_ID) {
+      return { ...result, action: "blocked_missing_shortcut_id" };
     }
 
     if (this.env.DRY_RUN !== "false") {
       return {
         ...result,
-        action: "dry_run_would_dispatch_github",
-        shortcutName: this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
-        state,
+        action: "dry_run_would_dispatch",
+        shortcutId: this.env.DREAME_SHORTCUT_ID,
       };
     }
 
-    const shortcutName = this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק";
-    const github = await this.dispatchGitHub(shortcutName, "run");
+    const github = await this.dispatchGitHub(this.env.DREAME_SHORTCUT_ID);
 
-    // Mark the day only after GitHub accepted the dispatch.
-    await this.ctx.storage.put("lastRunDate", now.date);
+    await this.ctx.storage.put("runInfo", {
+      date: now.date,
+      count: runInfo.count + 1,
+      lastRunAt: new Date().toISOString(),
+    });
 
-    return {
-      ...result,
-      action: "github_workflow_dispatched",
-      shortcutName,
-      github,
-      state,
-    };
+    return { ...result, action: "github_workflow_dispatched", github };
   }
 }
 
 export default {
   async fetch(request, env) {
     const token = request.headers.get("X-Webhook-Token");
-
     if (!env.WEBHOOK_TOKEN || token !== env.WEBHOOK_TOKEN) {
       return new Response("Unauthorized", { status: 401 });
     }
 
     const id = env.PRESENCE.idFromName("home");
-    const stub = env.PRESENCE.get(id);
-    return stub.fetch(request);
+    return env.PRESENCE.get(id).fetch(request);
   },
 
   async scheduled(_controller, env, _ctx) {
     const id = env.PRESENCE.idFromName("home");
-    const stub = env.PRESENCE.get(id);
-    await stub.fetch("https://internal/check");
+    await env.PRESENCE.get(id).fetch("https://internal/check");
   },
 };
