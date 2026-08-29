@@ -41,7 +41,7 @@ on:
       clean_genius_rooms:
         description: "CleanGenius room IDs"
         required: false
-        default: "7,1,2,4,5"
+        default: "2,3,4,7,8"
         type: string
 
       clean_genius_mode:
@@ -84,7 +84,7 @@ jobs:
   dreame:
     name: Dreame Cloud
     runs-on: ubuntu-latest
-    timeout-minutes: 8
+    timeout-minutes: 15
 
     steps:
       - name: Checkout
@@ -121,6 +121,7 @@ jobs:
 
           DREAME_PRIMARY_GRACE_SECONDS: ${{ vars.DREAME_PRIMARY_GRACE_SECONDS || '12' }}
           DREAME_SMART_RUN_TIMEOUT_SECONDS: ${{ vars.DREAME_SMART_RUN_TIMEOUT_SECONDS || '100' }}
+          DREAME_STATUS_DELAY_SECONDS: ${{ vars.DREAME_STATUS_DELAY_SECONDS || '300' }}
 
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
