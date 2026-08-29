@@ -16,6 +16,7 @@ on:
           - smart-run
           - telegram-find-chat
           - telegram-test
+          - telegram-flow-test
 
       primary_mode:
         description: "Primary: shortcut or CleanGenius"
@@ -77,6 +78,12 @@ on:
         default: "107,116"
         type: string
 
+      test_delay_seconds:
+        description: "Telegram flow test delay between stages (seconds)"
+        required: false
+        default: "15"
+        type: string
+
 permissions:
   contents: read
 
@@ -126,6 +133,7 @@ jobs:
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
           TELEGRAM_WATCH_SECONDS: ${{ vars.TELEGRAM_WATCH_SECONDS || '75' }}
+          TELEGRAM_FLOW_TEST_DELAY_SECONDS: ${{ inputs.test_delay_seconds || '15' }}
 
         shell: bash
         run: |
@@ -142,6 +150,11 @@ jobs:
 
           if [ "$MODE" = "telegram-test" ]; then
             node scripts/telegram.mjs telegram-test
+            exit 0
+          fi
+
+          if [ "$MODE" = "telegram-flow-test" ]; then
+            node scripts/telegram-flow-test.mjs
             exit 0
           fi
 
