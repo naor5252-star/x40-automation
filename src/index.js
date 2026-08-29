@@ -18,11 +18,7 @@ export class PresenceState {
     }
 
     if (url.pathname === "/trigger-test" && request.method === "POST") {
-      const shortcutId = this.env.DREAME_SHORTCUT_ID;
-      if (!shortcutId) {
-        return Response.json({ error: "Missing DREAME_SHORTCUT_ID" }, { status: 400 });
-      }
-      const result = await this.dispatchGitHub(shortcutId);
+      const result = await this.dispatchGitHub();
       return Response.json({ action: "github_test_dispatched", ...result });
     }
 
@@ -50,12 +46,24 @@ export class PresenceState {
     return new Response("Not found", { status: 404 });
   }
 
+  primaryMode() {
+    return (this.env.DREAME_PRIMARY_MODE || "cleangenius").toLowerCase();
+  }
+
+  cleanGeniusModeName() {
+    return String(this.env.DREAME_CLEAN_GENIUS_MODE || "1") === "2"
+      ? "Deep"
+      : "Routine";
+  }
+
   async getState() {
     const [naor, wife, runInfo] = await Promise.all([
       this.ctx.storage.get("presence:naor"),
       this.ctx.storage.get("presence:wife"),
       this.ctx.storage.get("runInfo"),
     ]);
+
+    const primaryMode = this.primaryMode();
 
     return {
       naor: naor ?? { state: "unknown" },
@@ -68,8 +76,27 @@ export class PresenceState {
         awayDelayMinutes: Number(this.env.AWAY_DELAY_MINUTES || "10"),
         maxRunsPerDay: Number(this.env.MAX_RUNS_PER_DAY || "1"),
         dryRun: this.env.DRY_RUN !== "false",
-        shortcutName: this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
-        shortcutIdConfigured: Boolean(this.env.DREAME_SHORTCUT_ID),
+
+        primaryMode,
+        shortcutName:
+          primaryMode === "cleangenius"
+            ? `CleanGenius ${this.cleanGeniusModeName()}`
+            : this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
+
+        cleanGeniusRooms:
+          this.env.DREAME_CLEAN_GENIUS_ROOMS || "7,1,2,4,5",
+        cleanGeniusMode:
+          this.env.DREAME_CLEAN_GENIUS_MODE || "1",
+        cleanGeniusLabel:
+          this.env.DREAME_CLEAN_GENIUS_LABEL ||
+          "סלון, חדר שינה ראשי 3, חדר שינה ראשי 2, משרד, מסדרון",
+
+        fallbackShortcutName:
+          this.env.DREAME_FALLBACK_SHORTCUT_NAME || "שאיבה בלבד",
+        fallbackShortcutIdConfigured:
+          Boolean(this.env.DREAME_FALLBACK_SHORTCUT_ID),
+        waterEmptyCodes:
+          this.env.DREAME_WATER_EMPTY_CODES || "107,116",
       },
       localTime: this.localNow(),
     };
@@ -103,7 +130,7 @@ export class PresenceState {
     return Number(m[1]) * 60 + Number(m[2]);
   }
 
-  async dispatchGitHub(shortcutId) {
+  async dispatchGitHub() {
     const owner = this.env.GITHUB_OWNER;
     const repo = this.env.GITHUB_REPO;
     const workflow = this.env.GITHUB_WORKFLOW || "dreame.yml";
@@ -113,6 +140,8 @@ export class PresenceState {
     if (!owner || !repo || !token) {
       throw new Error("Missing GitHub configuration.");
     }
+
+    const primaryMode = this.primaryMode();
 
     const endpoint =
       `https://api.github.com/repos/${encodeURIComponent(owner)}` +
@@ -131,8 +160,27 @@ export class PresenceState {
         ref,
         inputs: {
           mode: "smart-run",
-          shortcut_name: this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
-          shortcut_id: String(shortcutId),
+          primary_mode: primaryMode,
+
+          shortcut_name:
+            this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
+          shortcut_id:
+            String(this.env.DREAME_SHORTCUT_ID || ""),
+
+          clean_genius_rooms:
+            this.env.DREAME_CLEAN_GENIUS_ROOMS || "7,1,2,4,5",
+          clean_genius_mode:
+            this.env.DREAME_CLEAN_GENIUS_MODE || "1",
+          clean_genius_label:
+            this.env.DREAME_CLEAN_GENIUS_LABEL ||
+            "סלון, חדר שינה ראשי 3, חדר שינה ראשי 2, משרד, מסדרון",
+
+          fallback_shortcut_name:
+            this.env.DREAME_FALLBACK_SHORTCUT_NAME || "שאיבה בלבד",
+          fallback_shortcut_id:
+            String(this.env.DREAME_FALLBACK_SHORTCUT_ID || ""),
+          water_empty_codes:
+            this.env.DREAME_WATER_EMPTY_CODES || "107,116",
         },
       }),
     });
@@ -142,7 +190,17 @@ export class PresenceState {
       throw new Error(`GitHub dispatch failed: ${response.status} ${text}`);
     }
 
-    return { ok: true, status: response.status, shortcutId: String(shortcutId) };
+    return {
+      ok: true,
+      status: response.status,
+      primaryMode,
+      cleanGeniusRooms:
+        this.env.DREAME_CLEAN_GENIUS_ROOMS || "7,1,2,4,5",
+      cleanGeniusMode:
+        this.env.DREAME_CLEAN_GENIUS_MODE || "1",
+      fallbackShortcutConfigured:
+        Boolean(this.env.DREAME_FALLBACK_SHORTCUT_ID),
+    };
   }
 
   async checkAndMaybeRun(reason) {
@@ -153,12 +211,15 @@ export class PresenceState {
       state.naor?.state === "away" &&
       state.wife?.state === "away";
 
-    const awayDelayMs = Number(this.env.AWAY_DELAY_MINUTES || "10") * 60 * 1000;
+    const awayDelayMs =
+      Number(this.env.AWAY_DELAY_MINUTES || "10") * 60 * 1000;
     const nowMs = Date.now();
+
     const naorAwayLongEnough =
       state.naor?.state === "away" &&
       Number.isFinite(Date.parse(state.naor.updatedAt)) &&
       nowMs - Date.parse(state.naor.updatedAt) >= awayDelayMs;
+
     const wifeAwayLongEnough =
       state.wife?.state === "away" &&
       Number.isFinite(Date.parse(state.wife.updatedAt)) &&
@@ -183,25 +244,31 @@ export class PresenceState {
       maxRunsPerDay: maxRuns,
       localTime: now,
       action: "none",
+      primaryMode: this.primaryMode(),
     };
 
-    if (!bothAway || !naorAwayLongEnough || !wifeAwayLongEnough || !inWindow || runInfo.count >= maxRuns) {
+    if (
+      !bothAway ||
+      !naorAwayLongEnough ||
+      !wifeAwayLongEnough ||
+      !inWindow ||
+      runInfo.count >= maxRuns
+    ) {
       return result;
-    }
-
-    if (!this.env.DREAME_SHORTCUT_ID) {
-      return { ...result, action: "blocked_missing_shortcut_id" };
     }
 
     if (this.env.DRY_RUN !== "false") {
       return {
         ...result,
         action: "dry_run_would_dispatch",
-        shortcutId: this.env.DREAME_SHORTCUT_ID,
+        cleanGeniusRooms:
+          this.env.DREAME_CLEAN_GENIUS_ROOMS || "7,1,2,4,5",
+        cleanGeniusMode:
+          this.env.DREAME_CLEAN_GENIUS_MODE || "1",
       };
     }
 
-    const github = await this.dispatchGitHub(this.env.DREAME_SHORTCUT_ID);
+    const github = await this.dispatchGitHub();
 
     await this.ctx.storage.put("runInfo", {
       date: now.date,
@@ -209,7 +276,11 @@ export class PresenceState {
       lastRunAt: new Date().toISOString(),
     });
 
-    return { ...result, action: "github_workflow_dispatched", github };
+    return {
+      ...result,
+      action: "github_workflow_dispatched",
+      github,
+    };
   }
 }
 
@@ -224,7 +295,6 @@ export default {
       Boolean(env.WEBHOOK_TOKEN) &&
       webhookToken === env.WEBHOOK_TOKEN;
 
-    // Read-only token: valid ONLY for GET /status.
     const widgetAuthorized =
       request.method === "GET" &&
       url.pathname === "/status" &&
