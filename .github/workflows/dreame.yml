@@ -16,16 +16,46 @@ on:
           - telegram-find-chat
           - telegram-test
 
-      shortcut_name:
-        description: "Primary Dreame shortcut name"
+      primary_mode:
+        description: "Primary: shortcut or CleanGenius"
         required: true
+        default: "shortcut"
+        type: choice
+        options:
+          - shortcut
+          - cleangenius
+
+      shortcut_name:
+        description: "Primary shortcut name (when primary_mode=shortcut)"
+        required: false
         default: "ניקוי עמוק"
         type: string
 
       shortcut_id:
-        description: "Primary shortcut ID"
+        description: "Primary shortcut ID (when primary_mode=shortcut)"
         required: false
         default: ""
+        type: string
+
+      clean_genius_rooms:
+        description: "CleanGenius room IDs"
+        required: false
+        default: "7,1,2,4,5"
+        type: string
+
+      clean_genius_mode:
+        description: "CleanGenius: 1=Routine, 2=Deep"
+        required: false
+        default: "1"
+        type: choice
+        options:
+          - "1"
+          - "2"
+
+      clean_genius_label:
+        description: "Room names for Telegram"
+        required: false
+        default: "סלון, חדר שינה ראשי 3, חדר שינה ראשי 2, משרד, מסדרון"
         type: string
 
       fallback_shortcut_name:
@@ -75,12 +105,19 @@ jobs:
           DREAME_DEVICE_DID: ${{ vars.DREAME_DEVICE_DID }}
           DREAME_CAPTURE_SECONDS: ${{ vars.DREAME_CAPTURE_SECONDS || '150' }}
 
+          DREAME_PRIMARY_MODE: ${{ inputs.primary_mode }}
+
           DREAME_SHORTCUT_NAME: ${{ inputs.shortcut_name }}
           DREAME_SHORTCUT_ID: ${{ inputs.shortcut_id }}
+
+          DREAME_CLEAN_GENIUS_ROOMS: ${{ inputs.clean_genius_rooms }}
+          DREAME_CLEAN_GENIUS_MODE: ${{ inputs.clean_genius_mode }}
+          DREAME_CLEAN_GENIUS_LABEL: ${{ inputs.clean_genius_label }}
 
           DREAME_FALLBACK_SHORTCUT_NAME: ${{ inputs.fallback_shortcut_name }}
           DREAME_FALLBACK_SHORTCUT_ID: ${{ inputs.fallback_shortcut_id }}
           DREAME_WATER_EMPTY_CODES: ${{ inputs.water_empty_codes }}
+
           DREAME_PRIMARY_GRACE_SECONDS: ${{ vars.DREAME_PRIMARY_GRACE_SECONDS || '12' }}
           DREAME_SMART_RUN_TIMEOUT_SECONDS: ${{ vars.DREAME_SMART_RUN_TIMEOUT_SECONDS || '100' }}
 
@@ -121,4 +158,3 @@ jobs:
           fi
 
           node scripts/dreame.mjs "$MODE" "$SHORTCUT_NAME" "$SHORTCUT_ID"
-
