@@ -1,10 +1,15 @@
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "dreame-presence-automation",
+  "name": "x40-automation",
   "main": "src/index.js",
   "compatibility_date": "2026-08-28",
   "vars": {
-    "DRY_RUN": "true"
+    "DRY_RUN": "false",
+    "DREAME_PRIMARY_MODE": "cleangenius",
+    "DREAME_CLEAN_GENIUS_ROOMS": "7,1,2,4,5",
+    "DREAME_CLEAN_GENIUS_MODE": "2",
+    "DREAME_CLEAN_GENIUS_LABEL": "סלון, חדר שינה ראשי 3, חדר שינה ראשי 2, משרד, מסדרון",
+    "DREAME_WATER_EMPTY_CODES": "107,116"
   },
   "durable_objects": {
     "bindings": [
