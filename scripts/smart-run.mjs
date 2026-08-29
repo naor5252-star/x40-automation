@@ -356,15 +356,29 @@ sub.on("error", (err) => {
 setTimeout(async () => {
   if (finished) return;
 
-  await sendTelegram(
-    [
-      "⚠️ Dreame X40: לא הצלחתי לאשר שהניקוי התחיל",
-      `Primary: ${primaryLabel()}`,
-      `🕐 ${israelTime()}`,
-    ].join("\n")
+  const targetLabel = phase === "fallback" ? fallbackName : primaryLabel();
+  console.log(
+    `⚠️ No MQTT start confirmation for ${targetLabel}; command was sent, treating as success.`
   );
 
-  await finish(8);
+  const lines = [
+    "✅ Dreame X40: פקודת הניקוי נשלחה",
+    "⚠️ Dreame לא החזיר אישור התחלה, לכן לא ניתן לאמת את ההפעלה דרך MQTT.",
+  ];
+
+  if (phase === "fallback") {
+    lines.push(`🧹 תוכנית: ${fallbackName}`);
+  } else if (primaryMode === "cleangenius") {
+    lines.push(`🧠 מצב: CleanGenius ${cleanGeniusModeName()}`);
+    lines.push(`🏠 חדרים: ${cleanGeniusLabel}`);
+  } else {
+    lines.push(`🧹 תוכנית: ${shortcutName}`);
+  }
+
+  lines.push(`🕐 שעה: ${israelTime()}`);
+
+  await sendTelegram(lines.join("\n"));
+  await finish(0);
 }, timeoutSeconds * 1000);
 
 // Subscribe FIRST, then send the task.
