@@ -145,11 +145,11 @@ jobs:
           fi
 
           if [ "$MODE" = "map-rooms" ]; then
-  node scripts/map-rooms.mjs
-  exit 0
-fi
+            node scripts/map-rooms.mjs
+            exit 0
+          fi
 
-if [ "$MODE" = "smart-run" ]; then
+          if [ "$MODE" = "smart-run" ]; then
             node scripts/smart-run.mjs
             exit 0
           fi
