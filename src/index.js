@@ -18,8 +18,18 @@ export class PresenceState {
     }
 
     if (url.pathname === "/trigger-test" && request.method === "POST") {
-      const result = await this.dispatchGitHub();
-      return Response.json({ action: "github_test_dispatched", ...result });
+      try {
+        const result = await this.dispatchGitHub();
+        return Response.json({ action: "github_test_dispatched", ...result });
+      } catch (err) {
+        return Response.json(
+          {
+            action: "github_dispatch_failed",
+            error: err?.message || String(err),
+          },
+          { status: 502 }
+        );
+      }
     }
 
     const m = url.pathname.match(/^\/presence\/(naor|wife)$/);
@@ -268,7 +278,16 @@ export class PresenceState {
       };
     }
 
-    const github = await this.dispatchGitHub();
+    let github;
+    try {
+      github = await this.dispatchGitHub();
+    } catch (err) {
+      return {
+        ...result,
+        action: "github_dispatch_failed",
+        error: err?.message || String(err),
+      };
+    }
 
     await this.ctx.storage.put("runInfo", {
       date: now.date,
