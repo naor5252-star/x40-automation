@@ -12,17 +12,38 @@ on:
           - capture
           - list
           - run-id
+          - smart-run
           - telegram-find-chat
           - telegram-test
+
       shortcut_name:
-        description: "Dreame shortcut name"
+        description: "Primary Dreame shortcut name"
         required: true
         default: "ניקוי עמוק"
         type: string
+
       shortcut_id:
-        description: "Required only for run-id"
+        description: "Primary shortcut ID"
         required: false
         default: ""
+        type: string
+
+      fallback_shortcut_name:
+        description: "Fallback shortcut name"
+        required: false
+        default: "שאיבה בלבד"
+        type: string
+
+      fallback_shortcut_id:
+        description: "Fallback shortcut ID"
+        required: false
+        default: ""
+        type: string
+
+      water_empty_codes:
+        description: "Clean-water error codes"
+        required: false
+        default: "107,116"
         type: string
 
 permissions:
@@ -32,7 +53,7 @@ jobs:
   dreame:
     name: Dreame Cloud
     runs-on: ubuntu-latest
-    timeout-minutes: 7
+    timeout-minutes: 8
 
     steps:
       - name: Checkout
@@ -53,8 +74,15 @@ jobs:
           DREAME_REGION: ${{ vars.DREAME_REGION || 'sg' }}
           DREAME_DEVICE_DID: ${{ vars.DREAME_DEVICE_DID }}
           DREAME_CAPTURE_SECONDS: ${{ vars.DREAME_CAPTURE_SECONDS || '150' }}
+
           DREAME_SHORTCUT_NAME: ${{ inputs.shortcut_name }}
           DREAME_SHORTCUT_ID: ${{ inputs.shortcut_id }}
+
+          DREAME_FALLBACK_SHORTCUT_NAME: ${{ inputs.fallback_shortcut_name }}
+          DREAME_FALLBACK_SHORTCUT_ID: ${{ inputs.fallback_shortcut_id }}
+          DREAME_WATER_EMPTY_CODES: ${{ inputs.water_empty_codes }}
+          DREAME_PRIMARY_GRACE_SECONDS: ${{ vars.DREAME_PRIMARY_GRACE_SECONDS || '12' }}
+          DREAME_SMART_RUN_TIMEOUT_SECONDS: ${{ vars.DREAME_SMART_RUN_TIMEOUT_SECONDS || '100' }}
 
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -78,20 +106,19 @@ jobs:
             exit 0
           fi
 
+          if [ "$MODE" = "smart-run" ]; then
+            node scripts/smart-run.mjs
+            exit 0
+          fi
+
           if [ "$MODE" = "run-id" ]; then
-            # Start MQTT watcher BEFORE sending the cleaning command.
             node scripts/telegram.mjs watch &
             WATCH_PID=$!
-
-            # Give MQTT a moment to subscribe.
             sleep 2
-
-            # This script already treats Dreame 80001/no-ACK as non-fatal.
             node scripts/dreame.mjs "$MODE" "$SHORTCUT_NAME" "$SHORTCUT_ID"
-
-            # Keep the job alive until start is confirmed or watcher times out.
             wait "$WATCH_PID" || true
             exit 0
           fi
 
           node scripts/dreame.mjs "$MODE" "$SHORTCUT_NAME" "$SHORTCUT_ID"
+

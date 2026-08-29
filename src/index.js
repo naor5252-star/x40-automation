@@ -130,7 +130,7 @@ export class PresenceState {
       body: JSON.stringify({
         ref,
         inputs: {
-          mode: "run-id",
+          mode: "smart-run",
           shortcut_name: this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
           shortcut_id: String(shortcutId),
         },
