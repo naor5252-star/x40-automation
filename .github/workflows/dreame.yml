@@ -1,4 +1,9 @@
 name: Dreame X40 Shortcut
+run-name: Dreame X40 — ${{ inputs.mode }}
+
+concurrency:
+  group: ${{ (inputs.mode == 'smart-run' || inputs.mode == 'stop-and-dock') && 'dreame-x40-cleaning-control' || format('dreame-x40-{0}', github.run_id) }}
+  cancel-in-progress: true
 
 on:
   workflow_dispatch:
@@ -14,6 +19,7 @@ on:
           - list
           - run-id
           - smart-run
+          - stop-and-dock
           - telegram-find-chat
           - telegram-test
           - telegram-flow-test
@@ -78,6 +84,12 @@ on:
         default: "107,116"
         type: string
 
+      returned_by:
+        description: "Who returned home (naor/wife)"
+        required: false
+        default: ""
+        type: string
+
       test_delay_seconds:
         description: "Telegram flow test delay between stages (seconds)"
         required: false
@@ -129,6 +141,7 @@ jobs:
           DREAME_PRIMARY_GRACE_SECONDS: ${{ vars.DREAME_PRIMARY_GRACE_SECONDS || '12' }}
           DREAME_SMART_RUN_TIMEOUT_SECONDS: ${{ vars.DREAME_SMART_RUN_TIMEOUT_SECONDS || '100' }}
           DREAME_STATUS_DELAY_SECONDS: ${{ vars.DREAME_STATUS_DELAY_SECONDS || '300' }}
+          DREAME_RETURNED_BY: ${{ inputs.returned_by }}
 
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -160,6 +173,11 @@ jobs:
 
           if [ "$MODE" = "map-rooms" ]; then
             node scripts/map-rooms.mjs
+            exit 0
+          fi
+
+          if [ "$MODE" = "stop-and-dock" ]; then
+            node scripts/stop-and-dock.mjs
             exit 0
           fi
 

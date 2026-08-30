@@ -45,15 +45,84 @@ export class PresenceState {
         return new Response("state must be home or away", { status: 400 });
       }
 
-      await this.ctx.storage.put(`presence:${m[1]}`, {
+      const presenceKey = `presence:${m[1]}`;
+      const previousPresence = await this.ctx.storage.get(presenceKey);
+
+      await this.ctx.storage.put(presenceKey, {
         state: body.state,
         updatedAt: new Date().toISOString(),
       });
 
-      return Response.json(await this.checkAndMaybeRun("presence_update"));
+      let returnHome = null;
+      if (body.state === "home" && previousPresence?.state !== "home") {
+        returnHome = await this.stopIfActive(m[1]);
+      }
+
+      const check = await this.checkAndMaybeRun("presence_update");
+      return Response.json(
+        returnHome ? { ...check, returnHome } : check
+      );
     }
 
     return new Response("Not found", { status: 404 });
+  }
+
+  async stopIfActive(returnedBy) {
+    const runInfo = await this.ctx.storage.get("runInfo");
+
+    if (!runInfo?.active || !runInfo?.lastRunAt) {
+      return {
+        action: "no_active_cleaning_run",
+        returnedBy,
+      };
+    }
+
+    const maxActiveMinutes = Number(
+      this.env.ACTIVE_RUN_MAX_MINUTES || "240"
+    );
+    const lastRunMs = Date.parse(runInfo.lastRunAt);
+    const ageMinutes =
+      Number.isFinite(lastRunMs)
+        ? (Date.now() - lastRunMs) / 60000
+        : Number.POSITIVE_INFINITY;
+
+    if (ageMinutes > maxActiveMinutes) {
+      await this.ctx.storage.put("runInfo", {
+        ...runInfo,
+        active: false,
+        activeExpiredAt: new Date().toISOString(),
+      });
+
+      return {
+        action: "active_run_expired",
+        returnedBy,
+        ageMinutes: Math.round(ageMinutes),
+      };
+    }
+
+    let github;
+    try {
+      github = await this.dispatchGitHub("stop-and-dock", returnedBy);
+    } catch (err) {
+      return {
+        action: "stop_dispatch_failed",
+        returnedBy,
+        error: err?.message || String(err),
+      };
+    }
+
+    await this.ctx.storage.put("runInfo", {
+      ...runInfo,
+      active: false,
+      stopRequestedAt: new Date().toISOString(),
+      stoppedBy: returnedBy,
+    });
+
+    return {
+      action: "stop_and_dock_dispatched",
+      returnedBy,
+      github,
+    };
   }
 
   primaryMode() {
@@ -85,6 +154,9 @@ export class PresenceState {
         endTime: this.env.END_TIME || "15:00",
         awayDelayMinutes: Number(this.env.AWAY_DELAY_MINUTES || "10"),
         maxRunsPerDay: Number(this.env.MAX_RUNS_PER_DAY || "1"),
+        activeRunMaxMinutes: Number(
+          this.env.ACTIVE_RUN_MAX_MINUTES || "240"
+        ),
         dryRun: this.env.DRY_RUN !== "false",
 
         primaryMode,
@@ -94,7 +166,7 @@ export class PresenceState {
             : this.env.DREAME_SHORTCUT_NAME || "ניקוי עמוק",
 
         cleanGeniusRooms:
-          this.env.DREAME_CLEAN_GENIUS_ROOMS || "7,1,2,4,5",
+          this.env.DREAME_CLEAN_GENIUS_ROOMS || "2,3,4,7,8",
         cleanGeniusMode:
           this.env.DREAME_CLEAN_GENIUS_MODE || "1",
         cleanGeniusLabel:
@@ -140,7 +212,7 @@ export class PresenceState {
     return Number(m[1]) * 60 + Number(m[2]);
   }
 
-  async dispatchGitHub() {
+  async dispatchGitHub(mode = "smart-run", returnedBy = "") {
     const owner = this.env.GITHUB_OWNER;
     const repo = this.env.GITHUB_REPO;
     const workflow = this.env.GITHUB_WORKFLOW || "dreame.yml";
@@ -169,7 +241,8 @@ export class PresenceState {
       body: JSON.stringify({
         ref,
         inputs: {
-          mode: "smart-run",
+          mode,
+          returned_by: returnedBy,
           primary_mode: primaryMode,
 
           shortcut_name:
@@ -178,7 +251,7 @@ export class PresenceState {
             String(this.env.DREAME_SHORTCUT_ID || ""),
 
           clean_genius_rooms:
-            this.env.DREAME_CLEAN_GENIUS_ROOMS || "7,1,2,4,5",
+            this.env.DREAME_CLEAN_GENIUS_ROOMS || "2,3,4,7,8",
           clean_genius_mode:
             this.env.DREAME_CLEAN_GENIUS_MODE || "1",
           clean_genius_label:
@@ -203,9 +276,10 @@ export class PresenceState {
     return {
       ok: true,
       status: response.status,
+      mode,
       primaryMode,
       cleanGeniusRooms:
-        this.env.DREAME_CLEAN_GENIUS_ROOMS || "7,1,2,4,5",
+        this.env.DREAME_CLEAN_GENIUS_ROOMS || "2,3,4,7,8",
       cleanGeniusMode:
         this.env.DREAME_CLEAN_GENIUS_MODE || "1",
       fallbackShortcutConfigured:
@@ -272,7 +346,7 @@ export class PresenceState {
         ...result,
         action: "dry_run_would_dispatch",
         cleanGeniusRooms:
-          this.env.DREAME_CLEAN_GENIUS_ROOMS || "7,1,2,4,5",
+          this.env.DREAME_CLEAN_GENIUS_ROOMS || "2,3,4,7,8",
         cleanGeniusMode:
           this.env.DREAME_CLEAN_GENIUS_MODE || "1",
       };
@@ -293,6 +367,7 @@ export class PresenceState {
       date: now.date,
       count: runInfo.count + 1,
       lastRunAt: new Date().toISOString(),
+      active: true,
     });
 
     return {
