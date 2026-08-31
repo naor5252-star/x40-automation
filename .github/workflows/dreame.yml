@@ -20,6 +20,7 @@ on:
           - run-id
           - smart-run
           - stop-and-dock
+          - evening-check
           - telegram-find-chat
           - telegram-test
           - telegram-flow-test
@@ -84,6 +85,30 @@ on:
         default: "107,116"
         type: string
 
+      callback_url:
+        description: "Worker callback URL"
+        required: false
+        default: ""
+        type: string
+
+      callback_token:
+        description: "Per-run callback token"
+        required: false
+        default: ""
+        type: string
+
+      ran_today:
+        description: "Robot ran/requested today"
+        required: false
+        default: "false"
+        type: string
+
+      fallback_used:
+        description: "Fallback was used today"
+        required: false
+        default: "false"
+        type: string
+
       returned_by:
         description: "Who returned home (naor/wife)"
         required: false
@@ -142,6 +167,10 @@ jobs:
           DREAME_SMART_RUN_TIMEOUT_SECONDS: ${{ vars.DREAME_SMART_RUN_TIMEOUT_SECONDS || '100' }}
           DREAME_STATUS_DELAY_SECONDS: ${{ vars.DREAME_STATUS_DELAY_SECONDS || '300' }}
           DREAME_RETURNED_BY: ${{ inputs.returned_by }}
+          DREAME_CALLBACK_URL: ${{ inputs.callback_url }}
+          DREAME_CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          DREAME_RAN_TODAY: ${{ inputs.ran_today }}
+          DREAME_FALLBACK_USED: ${{ inputs.fallback_used }}
 
           TELEGRAM_BOT_TOKEN: ${{ secrets.TELEGRAM_BOT_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}
@@ -178,6 +207,11 @@ jobs:
 
           if [ "$MODE" = "stop-and-dock" ]; then
             node scripts/stop-and-dock.mjs
+            exit 0
+          fi
+
+          if [ "$MODE" = "evening-check" ]; then
+            node scripts/evening-check.mjs
             exit 0
           fi
 

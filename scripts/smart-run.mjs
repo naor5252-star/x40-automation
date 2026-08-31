@@ -31,6 +31,40 @@ const wantedDid = (process.env.DREAME_DEVICE_DID || "").trim();
 const botToken = (process.env.TELEGRAM_BOT_TOKEN || "").trim();
 const chatId = (process.env.TELEGRAM_CHAT_ID || "").trim();
 
+const callbackUrl = (process.env.DREAME_CALLBACK_URL || "").trim();
+const callbackToken = (process.env.DREAME_CALLBACK_TOKEN || "").trim();
+
+async function sendRunEvent(event) {
+  if (!callbackUrl || !callbackToken) {
+    console.log(`Run callback not configured; skipped event=${event}`);
+    return;
+  }
+
+  try {
+    const endpoint = callbackUrl.replace(/\/$/, "") + "/run-event";
+
+    const response = await fetch(endpoint, {
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "X-Run-Callback-Token": callbackToken,
+      },
+      body: JSON.stringify({ event }),
+    });
+
+    if (!response.ok) {
+      console.log(
+        `Run callback ${event} HTTP ${response.status}: ` +
+        `${(await response.text()).slice(0, 200)}`
+      );
+    } else {
+      console.log(`✅ Run callback sent: ${event}`);
+    }
+  } catch (err) {
+    console.log(`Run callback ${event} failed: ${err?.message || err}`);
+  }
+}
+
 const statusDelaySeconds = Math.max(60, Number(process.env.DREAME_STATUS_DELAY_SECONDS || "300"));
 const statusDelayMs = statusDelaySeconds * 1000;
 
@@ -175,8 +209,13 @@ function updateObservedProperty(p) {
     lastTaskStatus = Number(p.value); lastTaskStatusAt = now;
     console.log(`taskStatus=${lastTaskStatus} phase=${phase}`);
     if (lastTaskStatus === 2) {
-      if (phase === "fallback") fallbackActiveSeen = true;
-      else primaryActiveSeen = true;
+      if (phase === "fallback") {
+        fallbackActiveSeen = true;
+        void sendRunEvent("fallback-active");
+      } else {
+        primaryActiveSeen = true;
+        void sendRunEvent("primary-active");
+      }
     }
   }
   if (p.siid === 2 && p.piid === 2) {
@@ -317,6 +356,8 @@ async function useFallback(errorCode) {
     fallbackStatusSent = true;
     return;
   }
+
+  await sendRunEvent("fallback-used");
 
   await sendTelegram([
     "💧 אין מים במיכל המים הנקיים.",

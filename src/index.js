@@ -17,6 +17,10 @@ export class PresenceState {
       return Response.json(await this.checkAndMaybeRun("manual_check"));
     }
 
+    if (url.pathname === "/evening-check") {
+      return Response.json(await this.checkEveningReminder());
+    }
+
     if (url.pathname === "/trigger-test" && request.method === "POST") {
       try {
         const result = await this.dispatchGitHub();
@@ -30,6 +34,45 @@ export class PresenceState {
           { status: 502 }
         );
       }
+    }
+
+    if (url.pathname === "/run-event" && request.method === "POST") {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return new Response("Invalid JSON", { status: 400 });
+      }
+
+      const token = request.headers.get("X-Run-Callback-Token");
+      const runInfo = await this.ctx.storage.get("runInfo");
+
+      if (!token || !runInfo?.callbackToken || token !== runInfo.callbackToken) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const event = String(body?.event || "");
+
+      if (event === "fallback-used") {
+        await this.ctx.storage.put("runInfo", {
+          ...runInfo,
+          fallbackUsed: true,
+          fallbackUsedAt: new Date().toISOString(),
+        });
+        return Response.json({ ok: true, event });
+      }
+
+      if (event === "primary-active" || event === "fallback-active") {
+        await this.ctx.storage.put("runInfo", {
+          ...runInfo,
+          actualRun: true,
+          actualRunAt: runInfo.actualRunAt || new Date().toISOString(),
+          ...(event === "fallback-active" ? { fallbackUsed: true } : {}),
+        });
+        return Response.json({ ok: true, event });
+      }
+
+      return new Response("Unknown event", { status: 400 });
     }
 
     const m = url.pathname.match(/^\/presence\/(naor|wife)$/);
@@ -136,10 +179,11 @@ export class PresenceState {
   }
 
   async getState() {
-    const [naor, wife, runInfo] = await Promise.all([
+    const [naor, wife, runInfo, eveningInfo] = await Promise.all([
       this.ctx.storage.get("presence:naor"),
       this.ctx.storage.get("presence:wife"),
       this.ctx.storage.get("runInfo"),
+      this.ctx.storage.get("eveningInfo"),
     ]);
 
     const primaryMode = this.primaryMode();
@@ -148,10 +192,12 @@ export class PresenceState {
       naor: naor ?? { state: "unknown" },
       wife: wife ?? { state: "unknown" },
       runInfo: runInfo ?? null,
+      eveningInfo: eveningInfo ?? null,
       config: {
         timezone: this.env.TIMEZONE || "Asia/Jerusalem",
         startTime: this.env.START_TIME || "10:00",
         endTime: this.env.END_TIME || "15:00",
+        eveningCheckTime: this.env.EVENING_CHECK_TIME || "22:00",
         awayDelayMinutes: Number(this.env.AWAY_DELAY_MINUTES || "10"),
         maxRunsPerDay: Number(this.env.MAX_RUNS_PER_DAY || "1"),
         activeRunMaxMinutes: Number(
@@ -212,7 +258,7 @@ export class PresenceState {
     return Number(m[1]) * 60 + Number(m[2]);
   }
 
-  async dispatchGitHub(mode = "smart-run", returnedBy = "") {
+  async dispatchGitHub(mode = "smart-run", returnedBy = "", extra = {}) {
     const owner = this.env.GITHUB_OWNER;
     const repo = this.env.GITHUB_REPO;
     const workflow = this.env.GITHUB_WORKFLOW || "dreame.yml";
@@ -243,6 +289,10 @@ export class PresenceState {
         inputs: {
           mode,
           returned_by: returnedBy,
+          callback_url: String(extra.callbackUrl || ""),
+          callback_token: String(extra.callbackToken || ""),
+          ran_today: String(Boolean(extra.ranToday)),
+          fallback_used: String(Boolean(extra.fallbackUsed)),
           primary_mode: primaryMode,
 
           shortcut_name:
@@ -284,6 +334,68 @@ export class PresenceState {
         this.env.DREAME_CLEAN_GENIUS_MODE || "1",
       fallbackShortcutConfigured:
         Boolean(this.env.DREAME_FALLBACK_SHORTCUT_ID),
+    };
+  }
+
+  async checkEveningReminder() {
+    const now = this.localNow();
+    const target = this.parseClock(
+      this.env.EVENING_CHECK_TIME,
+      "22:00"
+    );
+
+    const delta = now.minuteOfDay - target;
+    if (delta < 0 || delta >= 10) {
+      return {
+        action: "outside_evening_window",
+        localTime: now,
+      };
+    }
+
+    const eveningInfo = await this.ctx.storage.get("eveningInfo");
+    if (eveningInfo?.date === now.date && eveningInfo?.sent) {
+      return {
+        action: "evening_already_dispatched",
+        localTime: now,
+      };
+    }
+
+    const runInfo = await this.ctx.storage.get("runInfo");
+    const todayRun = runInfo?.date === now.date ? runInfo : null;
+
+    const ranToday = Boolean(
+      todayRun && ((todayRun.count || 0) > 0 || todayRun.actualRun)
+    );
+    const fallbackUsed = Boolean(todayRun?.fallbackUsed);
+
+    let github;
+    try {
+      github = await this.dispatchGitHub("evening-check", "", {
+        ranToday,
+        fallbackUsed,
+      });
+    } catch (err) {
+      return {
+        action: "evening_dispatch_failed",
+        error: err?.message || String(err),
+        localTime: now,
+      };
+    }
+
+    await this.ctx.storage.put("eveningInfo", {
+      date: now.date,
+      sent: true,
+      sentAt: new Date().toISOString(),
+      ranToday,
+      fallbackUsed,
+    });
+
+    return {
+      action: "evening_check_dispatched",
+      ranToday,
+      fallbackUsed,
+      localTime: now,
+      github,
     };
   }
 
@@ -352,9 +464,18 @@ export class PresenceState {
       };
     }
 
+    const callbackToken =
+      crypto.randomUUID() + "-" + crypto.randomUUID();
+    const callbackUrl =
+      this.env.WORKER_PUBLIC_URL ||
+      "https://x40-automation.naor-5252.workers.dev";
+
     let github;
     try {
-      github = await this.dispatchGitHub();
+      github = await this.dispatchGitHub("smart-run", "", {
+        callbackToken,
+        callbackUrl,
+      });
     } catch (err) {
       return {
         ...result,
@@ -368,6 +489,9 @@ export class PresenceState {
       count: runInfo.count + 1,
       lastRunAt: new Date().toISOString(),
       active: true,
+      actualRun: false,
+      fallbackUsed: false,
+      callbackToken,
     });
 
     return {
@@ -395,7 +519,12 @@ export default {
       Boolean(env.WIDGET_TOKEN) &&
       widgetToken === env.WIDGET_TOKEN;
 
-    if (!webhookAuthorized && !widgetAuthorized) {
+    const runCallbackCandidate =
+      request.method === "POST" &&
+      url.pathname === "/run-event" &&
+      Boolean(request.headers.get("X-Run-Callback-Token"));
+
+    if (!webhookAuthorized && !widgetAuthorized && !runCallbackCandidate) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -405,6 +534,8 @@ export default {
 
   async scheduled(_controller, env, _ctx) {
     const id = env.PRESENCE.idFromName("home");
-    await env.PRESENCE.get(id).fetch("https://internal/check");
+    const stub = env.PRESENCE.get(id);
+    await stub.fetch("https://internal/check");
+    await stub.fetch("https://internal/evening-check");
   },
 };
