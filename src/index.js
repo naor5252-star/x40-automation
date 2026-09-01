@@ -218,11 +218,12 @@ export class PresenceState {
   }
 
   async getState() {
-    const [naor, wife, runInfo, eveningInfo] = await Promise.all([
+    const [naor, wife, runInfo, eveningInfo, skipInfo] = await Promise.all([
       this.ctx.storage.get("presence:naor"),
       this.ctx.storage.get("presence:wife"),
       this.ctx.storage.get("runInfo"),
       this.ctx.storage.get("eveningInfo"),
+      this.ctx.storage.get("skipInfo"),
     ]);
 
     const primaryMode = this.primaryMode();
