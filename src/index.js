@@ -75,6 +75,45 @@ export class PresenceState {
       return new Response("Unknown event", { status: 400 });
     }
 
+    if (url.pathname === "/skip-today" && request.method === "POST") {
+      const now = this.localNow();
+      const existing = await this.ctx.storage.get("skipInfo");
+
+      if (existing?.date === now.date) {
+        return Response.json({
+          action: "already_skipped",
+          skipInfo: existing,
+          localTime: now,
+        });
+      }
+
+      const skipInfo = {
+        date: now.date,
+        skippedAt: new Date().toISOString(),
+        source: "widget",
+      };
+
+      await this.ctx.storage.put("skipInfo", skipInfo);
+
+      let notification = { ok: false };
+      try {
+        const github = await this.dispatchGitHub("skip-day-notify");
+        notification = { ok: true, github };
+      } catch (err) {
+        notification = {
+          ok: false,
+          error: err?.message || String(err),
+        };
+      }
+
+      return Response.json({
+        action: "day_skipped",
+        skipInfo,
+        notification,
+        localTime: now,
+      });
+    }
+
     const m = url.pathname.match(/^\/presence\/(naor|wife)$/);
     if (m && request.method === "POST") {
       let body;
@@ -193,6 +232,7 @@ export class PresenceState {
       wife: wife ?? { state: "unknown" },
       runInfo: runInfo ?? null,
       eveningInfo: eveningInfo ?? null,
+      skipInfo: skipInfo ?? null,
       config: {
         timezone: this.env.TIMEZONE || "Asia/Jerusalem",
         startTime: this.env.START_TIME || "10:00",
@@ -403,6 +443,9 @@ export class PresenceState {
     const state = await this.getState();
     const now = this.localNow();
 
+    const skippedToday =
+      state.skipInfo?.date === now.date;
+
     const bothAway =
       state.naor?.state === "away" &&
       state.wife?.state === "away";
@@ -438,10 +481,19 @@ export class PresenceState {
       inWindow,
       runsToday: runInfo.count,
       maxRunsPerDay: maxRuns,
+      skippedToday,
       localTime: now,
       action: "none",
       primaryMode: this.primaryMode(),
     };
+
+    if (skippedToday) {
+      return {
+        ...result,
+        action: "skipped_today",
+        skipInfo: state.skipInfo,
+      };
+    }
 
     if (
       !bothAway ||

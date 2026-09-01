@@ -23,6 +23,7 @@ on:
           - evening-check
           - telegram-find-chat
           - telegram-test
+          - skip-day-notify
           - telegram-flow-test
 
       primary_mode:
@@ -192,6 +193,11 @@ jobs:
 
           if [ "$MODE" = "telegram-test" ]; then
             node scripts/telegram.mjs telegram-test
+            exit 0
+          fi
+
+          if [ "$MODE" = "skip-day-notify" ]; then
+            node scripts/skip-day-notify.mjs
             exit 0
           fi
 

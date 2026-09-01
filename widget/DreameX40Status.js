@@ -26,10 +26,18 @@ async function setup(existing = null) {
       "WIDGET_TOKEN",
       existing?.widgetToken || ""
     );
+    a.addSecureTextField(
+      "WEBHOOK_TOKEN (לכפתור דלג יום)",
+      existing?.controlToken || ""
+    );
   } else {
     a.addTextField(
       "WIDGET_TOKEN",
       existing?.widgetToken || ""
+    );
+    a.addTextField(
+      "WEBHOOK_TOKEN (לכפתור דלג יום)",
+      existing?.controlToken || ""
     );
   }
 
@@ -45,8 +53,9 @@ async function setup(existing = null) {
   const cfg = {
     workerUrl: sanitizeBaseUrl(a.textFieldValue(0)),
     widgetToken: a.textFieldValue(1).trim(),
-    person1Name: a.textFieldValue(2).trim() || "נאור",
-    person2Name: a.textFieldValue(3).trim() || "אשתי",
+    controlToken: a.textFieldValue(2).trim(),
+    person1Name: a.textFieldValue(3).trim() || "נאור",
+    person2Name: a.textFieldValue(4).trim() || "אשתי",
   };
 
   if (!cfg.workerUrl.startsWith("https://")) {
@@ -110,6 +119,65 @@ async function getStatus(cfg) {
   req.timeoutInterval = 12;
 
   return await req.loadJSON();
+}
+
+async function ensureControlToken(cfg) {
+  if (cfg?.controlToken) return cfg;
+
+  const a = new Alert();
+  a.title = "הפעלת דלג יום";
+  a.message =
+    "נדרש WEBHOOK_TOKEN פעם אחת. הוא יישמר ב-Keychain של Scriptable ולא בקוד.";
+
+  if (typeof a.addSecureTextField === "function") {
+    a.addSecureTextField("WEBHOOK_TOKEN", "");
+  } else {
+    a.addTextField("WEBHOOK_TOKEN", "");
+  }
+
+  a.addAction("שמור");
+  a.addCancelAction("ביטול");
+
+  const choice = await a.presentAlert();
+  if (choice === -1) return null;
+
+  const controlToken = a.textFieldValue(0).trim();
+  if (!controlToken) throw new Error("חסר WEBHOOK_TOKEN");
+
+  const updated = { ...cfg, controlToken };
+  Keychain.set(CONFIG_KEY, JSON.stringify(updated));
+  return updated;
+}
+
+function actionUrl(action) {
+  const base = URLScheme.forRunningScript();
+  const separator = base.includes("?") ? "&" : "?";
+  return `${base}${separator}action=${encodeURIComponent(action)}`;
+}
+
+async function skipToday(cfg) {
+  const req = new Request(`${cfg.workerUrl}/skip-today`);
+  req.method = "POST";
+  req.headers = {
+    "X-Webhook-Token": cfg.controlToken,
+    "Content-Type": "application/json",
+    "Accept": "application/json",
+  };
+  req.body = JSON.stringify({ source: "widget" });
+  req.timeoutInterval = 15;
+
+  const result = await req.loadJSON();
+  const statusCode = req.response?.statusCode || 200;
+
+  if (statusCode >= 400) {
+    throw new Error(
+      result?.error ||
+      result?.message ||
+      `Worker החזיר HTTP ${statusCode}`
+    );
+  }
+
+  return result;
 }
 
 function stateInfo(value) {
@@ -267,7 +335,7 @@ function buildWidget(data, cfg) {
 
     w.addSpacer(10);
 
-    addRobotStatus(w, data, true);
+    addRobotStatus(w, data, true, cfg);
   } else {
     const people = w.addStack();
     people.layoutHorizontally();
@@ -277,7 +345,7 @@ function buildWidget(data, cfg) {
     addPersonCard(people, cfg.person2Name, data?.wife);
 
     w.addSpacer(9);
-    addRobotStatus(w, data, false);
+    addRobotStatus(w, data, false, cfg);
   }
 
   // iOS may decide to refresh later; this is the requested earliest refresh.
@@ -289,12 +357,15 @@ function buildWidget(data, cfg) {
   return w;
 }
 
-function addRobotStatus(parent, data, compact) {
+function addRobotStatus(parent, data, compact, cfg) {
   const today = data?.localTime?.date;
   const runInfo = data?.runInfo;
+  const skipInfo = data?.skipInfo;
   const runs = runInfo?.date === today ? Number(runInfo?.count || 0) : 0;
   const ranToday = runs > 0;
+  const skippedToday = skipInfo?.date === today;
   const runTime = ranToday ? shortTime(runInfo?.lastRunAt) : "";
+  const skipTime = skippedToday ? shortTime(skipInfo?.skippedAt) : "";
 
   const row = parent.addStack();
   row.centerAlignContent();
@@ -305,33 +376,74 @@ function addRobotStatus(parent, data, compact) {
     new Color("#1C1C1E")
   );
 
-  const color = ranToday ? new Color("#34C759") : Color.gray();
+  const color = skippedToday
+    ? new Color("#FF9F0A")
+    : ranToday
+      ? new Color("#34C759")
+      : Color.gray();
 
-  addSymbol(row, ranToday ? "checkmark.circle.fill" : "circle", color, compact ? 17 : 20);
+  const symbol = skippedToday
+    ? "forward.fill"
+    : ranToday
+      ? "checkmark.circle.fill"
+      : "circle";
+
+  addSymbol(row, symbol, color, compact ? 17 : 20);
   row.addSpacer(8);
 
   const texts = row.addStack();
   texts.layoutVertically();
 
   const main = texts.addText(
-    ranToday
-      ? `הרובוט הופעל היום${runTime ? ` ב-${runTime}` : ""}`
-      : "הרובוט עדיין לא הופעל היום"
+    skippedToday
+      ? `היום דולג${skipTime ? ` ב-${skipTime}` : ""}`
+      : ranToday
+        ? `הרובוט הופעל היום${runTime ? ` ב-${runTime}` : ""}`
+        : "הרובוט עדיין לא הופעל היום"
   );
   main.font = Font.semiboldSystemFont(compact ? 10 : 12);
   main.textColor = Color.dynamic(Color.black(), Color.white());
   main.lineLimit = 1;
-  main.minimumScaleFactor = 0.75;
+  main.minimumScaleFactor = 0.68;
 
   if (!compact) {
     const sub = texts.addText(
-      ranToday
-        ? `${runs} הפעלות דרך האוטומציה • ${data?.config?.shortcutName || "ניקוי עמוק"}`
-        : `${data?.config?.shortcutName || "ניקוי עמוק"} • ממתין לתנאים`
+      skippedToday
+        ? "האוטומציה לא תפעיל ניקיון היום"
+        : ranToday
+          ? `${runs} הפעלות דרך האוטומציה • ${data?.config?.shortcutName || "ניקוי עמוק"}`
+          : `${data?.config?.shortcutName || "ניקוי עמוק"} • ממתין לתנאים`
     );
     sub.font = Font.systemFont(9);
     sub.textColor = Color.gray();
     sub.lineLimit = 1;
+  }
+
+  row.addSpacer(8);
+
+  const button = row.addStack();
+  button.centerAlignContent();
+  button.setPadding(compact ? 5 : 6, compact ? 6 : 9, compact ? 5 : 6, compact ? 6 : 9);
+  button.cornerRadius = 8;
+  button.backgroundColor = skippedToday
+    ? Color.dynamic(new Color("#E5E5EA"), new Color("#3A3A3C"))
+    : Color.dynamic(new Color("#FFF2CC"), new Color("#4A3B00"));
+
+  const buttonText = button.addText(
+    skippedToday
+      ? (compact ? "✓" : "דולג")
+      : (compact ? "דלג" : "דלג יום")
+  );
+  buttonText.font = Font.boldSystemFont(compact ? 9 : 10);
+  buttonText.textColor = skippedToday
+    ? Color.gray()
+    : new Color("#C77800");
+  buttonText.lineLimit = 1;
+
+  if (!skippedToday) {
+    const url = actionUrl("skip");
+    button.url = url;
+    buttonText.url = url;
   }
 }
 
@@ -361,6 +473,9 @@ function errorWidget(message) {
 // ----- Main -----
 
 let cfg = loadConfig();
+const requestedAction = String(args?.queryParameters?.action || "")
+  .trim()
+  .toLowerCase();
 
 if (!cfg) {
   if (config.runsInWidget) {
@@ -375,7 +490,59 @@ if (!cfg) {
     Script.complete();
     return;
   }
-} else if (!config.runsInWidget) {
+}
+
+if (!config.runsInWidget && requestedAction === "skip") {
+  try {
+    cfg = await ensureControlToken(cfg);
+    if (!cfg) {
+      Script.complete();
+      return;
+    }
+
+    const confirm = new Alert();
+    confirm.title = "דלג על הניקיון היום?";
+    confirm.message =
+      "האוטומציה לא תפעיל ניקיון אוטומטי עד מחר. פעולה זו לא עוצרת ניקיון שכבר התחיל.";
+    confirm.addAction("כן, דלג היום");
+    confirm.addCancelAction("ביטול");
+
+    const answer = await confirm.presentAlert();
+    if (answer === -1) {
+      Script.complete();
+      return;
+    }
+
+    const result = await skipToday(cfg);
+
+    const done = new Alert();
+    done.title =
+      result?.action === "already_skipped"
+        ? "היום כבר דולג"
+        : "הדילוג הופעל";
+    done.message =
+      result?.action === "already_skipped"
+        ? "האוטומציה כבר מסומנת לדילוג היום."
+        : "היום סומן כדילוג. נשלחה גם הודעת Telegram.";
+    done.addAction("אישור");
+    await done.presentAlert();
+
+    const data = await getStatus(cfg);
+    const widget = buildWidget(data, cfg);
+    await widget.presentMedium();
+  } catch (err) {
+    const a = new Alert();
+    a.title = "לא ניתן לדלג היום";
+    a.message = err?.message || String(err);
+    a.addAction("אישור");
+    await a.presentAlert();
+  }
+
+  Script.complete();
+  return;
+}
+
+if (!config.runsInWidget) {
   cfg = await settingsMenu(cfg);
   if (!cfg) return;
 }
@@ -400,3 +567,4 @@ try {
 }
 
 Script.complete();
+
