@@ -21,6 +21,10 @@ export class PresenceState {
       return Response.json(await this.checkEveningReminder());
     }
 
+    if (url.pathname === "/water-check") {
+      return Response.json(await this.checkWaterStatus());
+    }
+
     if (url.pathname === "/trigger-test" && request.method === "POST") {
       try {
         const result = await this.dispatchGitHub();
@@ -73,6 +77,46 @@ export class PresenceState {
       }
 
       return new Response("Unknown event", { status: 400 });
+    }
+
+    if (url.pathname === "/water-event" && request.method === "POST") {
+      let body;
+      try {
+        body = await request.json();
+      } catch {
+        return new Response("Invalid JSON", { status: 400 });
+      }
+
+      const token = request.headers.get("X-Water-Callback-Token");
+      const checkInfo = await this.ctx.storage.get("waterCheckInfo");
+
+      if (!token || !checkInfo?.callbackToken || token !== checkInfo.callbackToken) {
+        return new Response("Unauthorized", { status: 401 });
+      }
+
+      const allowed = new Set(["ok", "missing", "unknown"]);
+      const status = allowed.has(String(body?.status))
+        ? String(body.status)
+        : "unknown";
+
+      const waterInfo = {
+        date: this.localNow().date,
+        status,
+        waterMissing: Boolean(body?.waterMissing),
+        waterStatusKnown: Boolean(body?.waterStatusKnown),
+        codes: Array.isArray(body?.codes) ? body.codes.slice(0, 20) : [],
+        checkedAt: body?.checkedAt || new Date().toISOString(),
+        receivedAt: new Date().toISOString(),
+      };
+
+      await this.ctx.storage.put("waterInfo", waterInfo);
+      await this.ctx.storage.put("waterCheckInfo", {
+        ...checkInfo,
+        callbackReceivedAt: new Date().toISOString(),
+        callbackToken: null,
+      });
+
+      return Response.json({ ok: true, waterInfo });
     }
 
     if (url.pathname === "/skip-today" && request.method === "POST") {
@@ -233,12 +277,13 @@ export class PresenceState {
   }
 
   async getState() {
-    const [naor, wife, runInfo, eveningInfo, skipInfo] = await Promise.all([
+    const [naor, wife, runInfo, eveningInfo, skipInfo, waterInfo] = await Promise.all([
       this.ctx.storage.get("presence:naor"),
       this.ctx.storage.get("presence:wife"),
       this.ctx.storage.get("runInfo"),
       this.ctx.storage.get("eveningInfo"),
       this.ctx.storage.get("skipInfo"),
+      this.ctx.storage.get("waterInfo"),
     ]);
 
     const primaryMode = this.primaryMode();
@@ -249,11 +294,13 @@ export class PresenceState {
       runInfo: runInfo ?? null,
       eveningInfo: eveningInfo ?? null,
       skipInfo: skipInfo ?? null,
+      waterInfo: waterInfo ?? null,
       config: {
         timezone: this.env.TIMEZONE || "Asia/Jerusalem",
         startTime: this.env.START_TIME || "10:00",
         endTime: this.env.END_TIME || "15:00",
         eveningCheckTime: this.env.EVENING_CHECK_TIME || "22:00",
+        waterCheckTime: this.env.WATER_CHECK_TIME || "22:00",
         awayDelayMinutes: Number(this.env.AWAY_DELAY_MINUTES || "10"),
         maxRunsPerDay: Number(this.env.MAX_RUNS_PER_DAY || "1"),
         activeRunMaxMinutes: Number(
@@ -390,6 +437,60 @@ export class PresenceState {
         this.env.DREAME_CLEAN_GENIUS_MODE || "1",
       fallbackShortcutConfigured:
         Boolean(this.env.DREAME_FALLBACK_SHORTCUT_ID),
+    };
+  }
+
+  async checkWaterStatus() {
+    const now = this.localNow();
+    const target = this.parseClock(this.env.WATER_CHECK_TIME, "22:00");
+
+    const delta = now.minuteOfDay - target;
+    if (delta < 0 || delta >= 10) {
+      return {
+        action: "outside_water_check_window",
+        localTime: now,
+      };
+    }
+
+    const previous = await this.ctx.storage.get("waterCheckInfo");
+    if (previous?.date === now.date && previous?.dispatched) {
+      return {
+        action: "water_check_already_dispatched",
+        localTime: now,
+      };
+    }
+
+    const callbackToken =
+      crypto.randomUUID() + "-" + crypto.randomUUID();
+    const callbackUrl =
+      this.env.WORKER_PUBLIC_URL ||
+      "https://x40-automation.naor-5252.workers.dev";
+
+    let github;
+    try {
+      github = await this.dispatchGitHub("water-check", "", {
+        callbackToken,
+        callbackUrl,
+      });
+    } catch (err) {
+      return {
+        action: "water_check_dispatch_failed",
+        error: err?.message || String(err),
+        localTime: now,
+      };
+    }
+
+    await this.ctx.storage.put("waterCheckInfo", {
+      date: now.date,
+      dispatched: true,
+      dispatchedAt: new Date().toISOString(),
+      callbackToken,
+    });
+
+    return {
+      action: "water_check_dispatched",
+      localTime: now,
+      github,
     };
   }
 
@@ -592,7 +693,17 @@ export default {
       url.pathname === "/run-event" &&
       Boolean(request.headers.get("X-Run-Callback-Token"));
 
-    if (!webhookAuthorized && !widgetAuthorized && !runCallbackCandidate) {
+    const waterCallbackCandidate =
+      request.method === "POST" &&
+      url.pathname === "/water-event" &&
+      Boolean(request.headers.get("X-Water-Callback-Token"));
+
+    if (
+      !webhookAuthorized &&
+      !widgetAuthorized &&
+      !runCallbackCandidate &&
+      !waterCallbackCandidate
+    ) {
       return new Response("Unauthorized", { status: 401 });
     }
 
@@ -605,5 +716,6 @@ export default {
     const stub = env.PRESENCE.get(id);
     await stub.fetch("https://internal/check");
     await stub.fetch("https://internal/evening-check");
+    await stub.fetch("https://internal/water-check");
   },
 };

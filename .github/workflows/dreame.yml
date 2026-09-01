@@ -21,6 +21,7 @@ on:
           - smart-run
           - stop-and-dock
           - evening-check
+          - water-check
           - telegram-find-chat
           - telegram-test
           - skip-day-notify
@@ -224,6 +225,11 @@ jobs:
 
           if [ "$MODE" = "evening-check" ]; then
             node scripts/evening-check.mjs
+            exit 0
+          fi
+
+          if [ "$MODE" = "water-check" ]; then
+            node scripts/water-check.mjs
             exit 0
           fi
 

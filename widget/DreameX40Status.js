@@ -357,6 +357,60 @@ function buildWidget(data, cfg) {
   return w;
 }
 
+
+function waterDisplayInfo(data) {
+  const info = data?.waterInfo;
+  const checkTime = data?.config?.waterCheckTime || "22:00";
+
+  if (!info?.checkedAt) {
+    return {
+      text: `💧 ממתין לבדיקת מים ב-${checkTime}`,
+      color: Color.gray(),
+    };
+  }
+
+  let fresh = false;
+  try {
+    const checkedMs = new Date(info.checkedAt).getTime();
+    const ageMs = Date.now() - checkedMs;
+    fresh =
+      Number.isFinite(ageMs) &&
+      ageMs >= 0 &&
+      ageMs <= 36 * 60 * 60 * 1000;
+  } catch {
+    fresh = false;
+  }
+
+  const checked = shortTime(info.checkedAt);
+  const suffix = checked ? ` • נבדק ${checked}` : "";
+
+  if (!fresh) {
+    return {
+      text: `💧 בדיקת המים לא עדכנית${suffix}`,
+      color: Color.gray(),
+    };
+  }
+
+  if (info.status === "missing" || info.waterMissing === true) {
+    return {
+      text: `🚰 חסר מים — צריך למלא${suffix}`,
+      color: new Color("#FF3B30"),
+    };
+  }
+
+  if (info.status === "ok") {
+    return {
+      text: `💧 יש מים לקראת ההפעלה הבאה${suffix}`,
+      color: new Color("#34C759"),
+    };
+  }
+
+  return {
+    text: `💧 מצב המים לא ידוע${suffix}`,
+    color: new Color("#FF9F0A"),
+  };
+}
+
 function addRobotStatus(parent, data, compact, cfg) {
   const today = data?.localTime?.date;
   const runInfo = data?.runInfo;
@@ -418,6 +472,14 @@ function addRobotStatus(parent, data, compact, cfg) {
     sub.textColor = Color.gray();
     sub.lineLimit = 1;
   }
+
+  texts.addSpacer(compact ? 2 : 3);
+  const water = waterDisplayInfo(data);
+  const waterLine = texts.addText(water.text);
+  waterLine.font = Font.semiboldSystemFont(compact ? 8 : 9);
+  waterLine.textColor = water.color;
+  waterLine.lineLimit = 1;
+  waterLine.minimumScaleFactor = 0.65;
 
   row.addSpacer(8);
 
