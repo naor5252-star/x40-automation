@@ -426,25 +426,23 @@ function addRobotStatus(parent, data, compact, cfg) {
   button.setPadding(compact ? 5 : 6, compact ? 6 : 9, compact ? 5 : 6, compact ? 6 : 9);
   button.cornerRadius = 8;
   button.backgroundColor = skippedToday
-    ? Color.dynamic(new Color("#E5E5EA"), new Color("#3A3A3C"))
+    ? Color.dynamic(new Color("#E8F8ED"), new Color("#12351D"))
     : Color.dynamic(new Color("#FFF2CC"), new Color("#4A3B00"));
 
   const buttonText = button.addText(
     skippedToday
-      ? (compact ? "✓" : "דולג")
+      ? (compact ? "בטל" : "בטל דילוג")
       : (compact ? "דלג" : "דלג יום")
   );
   buttonText.font = Font.boldSystemFont(compact ? 9 : 10);
   buttonText.textColor = skippedToday
-    ? Color.gray()
+    ? new Color("#34C759")
     : new Color("#C77800");
   buttonText.lineLimit = 1;
 
-  if (!skippedToday) {
-    const url = actionUrl("skip");
-    button.url = url;
-    buttonText.url = url;
-  }
+  const url = actionUrl("skip-toggle");
+  button.url = url;
+  buttonText.url = url;
 }
 
 function errorWidget(message) {
@@ -492,7 +490,10 @@ if (!cfg) {
   }
 }
 
-if (!config.runsInWidget && requestedAction === "skip") {
+if (
+  !config.runsInWidget &&
+  (requestedAction === "skip" || requestedAction === "skip-toggle")
+) {
   try {
     cfg = await ensureControlToken(cfg);
     if (!cfg) {
@@ -500,11 +501,20 @@ if (!config.runsInWidget && requestedAction === "skip") {
       return;
     }
 
+    const before = await getStatus(cfg);
+    const today = before?.localTime?.date;
+    const currentlySkipped = before?.skipInfo?.date === today;
+
     const confirm = new Alert();
-    confirm.title = "דלג על הניקיון היום?";
-    confirm.message =
-      "האוטומציה לא תפעיל ניקיון אוטומטי עד מחר. פעולה זו לא עוצרת ניקיון שכבר התחיל.";
-    confirm.addAction("כן, דלג היום");
+    confirm.title = currentlySkipped
+      ? "לבטל את הדילוג להיום?"
+      : "דלג על הניקיון היום?";
+    confirm.message = currentlySkipped
+      ? "האוטומציה תחזור להיות פעילה להמשך היום. אם התנאים מתקיימים, היא תוכל להפעיל ניקיון אוטומטי."
+      : "האוטומציה לא תפעיל ניקיון אוטומטי עד מחר. פעולה זו לא עוצרת ניקיון שכבר התחיל.";
+    confirm.addAction(
+      currentlySkipped ? "כן, בטל דילוג" : "כן, דלג היום"
+    );
     confirm.addCancelAction("ביטול");
 
     const answer = await confirm.presentAlert();
@@ -516,14 +526,20 @@ if (!config.runsInWidget && requestedAction === "skip") {
     const result = await skipToday(cfg);
 
     const done = new Alert();
-    done.title =
-      result?.action === "already_skipped"
-        ? "היום כבר דולג"
-        : "הדילוג הופעל";
-    done.message =
-      result?.action === "already_skipped"
-        ? "האוטומציה כבר מסומנת לדילוג היום."
-        : "היום סומן כדילוג. נשלחה גם הודעת Telegram.";
+    if (result?.action === "day_skipped") {
+      done.title = "הדילוג הופעל";
+      done.message =
+        "היום סומן כדילוג. נשלחה גם הודעת Telegram.";
+    } else if (result?.action === "skip_cancelled") {
+      done.title = "הדילוג בוטל";
+      done.message =
+        "האוטומציה חזרה להיות פעילה להמשך היום. נשלחה גם הודעת Telegram.";
+    } else {
+      done.title = "הפעולה הושלמה";
+      done.message =
+        result?.message || "מצב הדילוג עודכן.";
+    }
+
     done.addAction("אישור");
     await done.presentAlert();
 
@@ -532,7 +548,7 @@ if (!config.runsInWidget && requestedAction === "skip") {
     await widget.presentMedium();
   } catch (err) {
     const a = new Alert();
-    a.title = "לא ניתן לדלג היום";
+    a.title = "לא ניתן לעדכן את מצב הדילוג";
     a.message = err?.message || String(err);
     a.addAction("אישור");
     await a.presentAlert();

@@ -22,9 +22,9 @@ const response = await fetch(
     body: JSON.stringify({
       chat_id: chatId,
       text: [
-        "⏭️ דילוג יום הופעל",
-        "🤖 ה־Dreame X40 לא יופעל אוטומטית היום.",
-        "📅 הדילוג תקף עד סוף היום.",
+        "▶️ דילוג היום בוטל",
+        "🤖 אוטומציית Dreame X40 חזרה להיות פעילה להמשך היום.",
+        "🏠 אם תנאי הנוכחות והזמן מתקיימים, ניקיון אוטומטי יכול לפעול.",
         `🕐 שעה: ${israelTime()}`,
       ].join("\n"),
     }),
@@ -37,4 +37,4 @@ if (!response.ok) {
   );
 }
 
-console.log("✅ Skip-day Telegram notification sent.");
+console.log("✅ Skip-day cancellation Telegram notification sent.");

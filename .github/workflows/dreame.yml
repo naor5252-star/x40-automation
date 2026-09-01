@@ -24,6 +24,7 @@ on:
           - telegram-find-chat
           - telegram-test
           - skip-day-notify
+          - skip-day-cancel-notify
           - telegram-flow-test
 
       primary_mode:
@@ -198,6 +199,11 @@ jobs:
 
           if [ "$MODE" = "skip-day-notify" ]; then
             node scripts/skip-day-notify.mjs
+            exit 0
+          fi
+
+          if [ "$MODE" = "skip-day-cancel-notify" ]; then
+            node scripts/skip-day-cancel-notify.mjs
             exit 0
           fi
 

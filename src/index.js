@@ -78,11 +78,26 @@ export class PresenceState {
     if (url.pathname === "/skip-today" && request.method === "POST") {
       const now = this.localNow();
       const existing = await this.ctx.storage.get("skipInfo");
+      const skippedToday = existing?.date === now.date;
 
-      if (existing?.date === now.date) {
+      if (skippedToday) {
+        await this.ctx.storage.delete("skipInfo");
+
+        let notification = { ok: false };
+        try {
+          const github = await this.dispatchGitHub("skip-day-cancel-notify");
+          notification = { ok: true, github };
+        } catch (err) {
+          notification = {
+            ok: false,
+            error: err?.message || String(err),
+          };
+        }
+
         return Response.json({
-          action: "already_skipped",
-          skipInfo: existing,
+          action: "skip_cancelled",
+          skipInfo: null,
+          notification,
           localTime: now,
         });
       }
