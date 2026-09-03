@@ -115,6 +115,29 @@ export const dashboardHtml = String.raw`<!doctype html>
       padding:8px 11px; margin:0; cursor:pointer; font-size:12px;
     }
     .day-chip input { width:auto; margin:0; accent-color:var(--blue); }
+    .plan-room-grid { display:grid; gap:8px; }
+    .plan-room-row {
+      display:grid;
+      grid-template-columns:62px minmax(130px,1.4fr) 130px 110px 110px 90px 72px;
+      gap:8px; align-items:end; padding:10px;
+      border:1px solid var(--line); border-radius:12px; background:#0b1728;
+    }
+    .week-grid {
+      display:grid; grid-template-columns:repeat(2,minmax(0,1fr)); gap:10px;
+    }
+    .day-plan {
+      border:1px solid var(--line); border-radius:14px;
+      padding:12px; background:#0b1728;
+    }
+    .day-room {
+      display:grid; grid-template-columns:28px minmax(0,1fr) 70px;
+      gap:8px; align-items:center; padding:5px 0;
+    }
+    .day-room input[type="checkbox"] { width:auto; }
+    @media(max-width:850px) {
+      .plan-room-row { grid-template-columns:1fr 1fr; }
+      .week-grid { grid-template-columns:1fr; }
+    }
     .pill {
       border:1px solid var(--line);
       border-radius:999px; padding:5px 9px;
@@ -248,6 +271,31 @@ export const dashboardHtml = String.raw`<!doctype html>
 
     <div class="card section">
       <div class="row" style="justify-content:space-between">
+        <div>
+          <h2>🧩 תוכנית ניקיון לפי חדר ויום</h2>
+          <div class="help" id="todayPlanSummary">—</div>
+        </div>
+        <button class="btn" onclick="addRoomProfile()">+ הוסף חדר</button>
+      </div>
+
+      <h3 style="font-size:14px;margin:18px 0 8px">הגדרה לכל חדר</h3>
+      <div class="plan-room-grid" id="roomProfileRows"></div>
+
+      <h3 style="font-size:14px;margin:20px 0 8px">מבנה התוכנית לפי יום</h3>
+      <p class="help">
+        בחר אילו חדרים יופעלו בכל יום ואת הסדר שלהם. סוג הניקיון של כל חדר
+        נלקח מהפרופיל שמעל.
+      </p>
+      <div class="week-grid" id="weeklyPlanGrid"></div>
+
+      <p class="help" style="margin-top:12px">
+        💧 ה־fallback נשאר פעיל: אם שלב CleanGenius מזהה חוסר מים,
+        התוכנית עוברת ל־Fallback Shortcut הקיים.
+      </p>
+    </div>
+
+    <div class="card section">
+      <div class="row" style="justify-content:space-between">
         <h2>פרמטרים</h2>
         <span class="pill">נשמרים ב־Durable Object • ללא deploy</span>
       </div>
@@ -349,6 +397,8 @@ export const dashboardHtml = String.raw`<!doctype html>
   const TOKEN_KEY = "dreame-x40-dashboard-token";
   let data = null;
   let refreshTimer = null;
+  let roomProfilesDraft = [];
+  let weeklyPlanDraft = {};
 
   const $ = (id) => document.getElementById(id);
 
@@ -440,6 +490,226 @@ export const dashboardHtml = String.raw`<!doctype html>
     return parts.join(" • ");
   }
 
+  const PLAN_DAY_LABELS = {
+    1:"שני", 2:"שלישי", 3:"רביעי",
+    4:"חמישי", 5:"שישי", 6:"שבת", 7:"ראשון"
+  };
+
+  function deepClone(value) {
+    return JSON.parse(JSON.stringify(value));
+  }
+
+  function suctionLabel(value) {
+    const labels = ["Quiet","Standard","Intense","Max"];
+    return labels[Number(value)] || String(value);
+  }
+
+  function renderRoomPlanEditor() {
+    const roomBox = $("roomProfileRows");
+    const weekBox = $("weeklyPlanGrid");
+    if (!roomBox || !weekBox) return;
+
+    roomBox.innerHTML = "";
+
+    roomProfilesDraft.forEach(function(room) {
+      const row = document.createElement("div");
+      row.className = "plan-room-row";
+      row.dataset.roomId = String(room.id);
+
+      row.innerHTML =
+        '<div><label>ID</label><input data-rp="id" value="' +
+        escapeHtml(room.id) + '" disabled></div>' +
+        '<div><label>שם חדר</label><input data-rp="name" value="' +
+        escapeHtml(room.name || "") + '"></div>' +
+        '<div><label>מצב</label><select data-rp="mode">' +
+        '<option value="cleangenius">CleanGenius</option>' +
+        '<option value="vacuum">שאיבה בלבד</option>' +
+        '</select></div>' +
+        '<div><label>CleanGenius</label><select data-rp="geniusMode">' +
+        '<option value="1">Routine</option><option value="2">Deep</option>' +
+        '</select></div>' +
+        '<div><label>עוצמת שאיבה</label><select data-rp="suction">' +
+        '<option value="0">Quiet</option><option value="1">Standard</option>' +
+        '<option value="2">Intense</option><option value="3">Max</option>' +
+        '</select></div>' +
+        '<div><label>מעברים</label><select data-rp="repeats">' +
+        '<option value="1">1</option><option value="2">2</option>' +
+        '<option value="3">3</option></select></div>' +
+        '<div><label>&nbsp;</label><button class="btn danger" ' +
+        'onclick="removeRoomProfile(' + Number(room.id) + ')">מחק</button></div>';
+
+      roomBox.appendChild(row);
+
+      row.querySelector('[data-rp="mode"]').value = room.mode || "cleangenius";
+      row.querySelector('[data-rp="geniusMode"]').value =
+        String(room.geniusMode || "1");
+      row.querySelector('[data-rp="suction"]').value =
+        String(room.suction ?? 2);
+      row.querySelector('[data-rp="repeats"]').value =
+        String(room.repeats ?? 1);
+    });
+
+    weekBox.innerHTML = "";
+
+    [7,1,2,3,4,5,6].forEach(function(day) {
+      const key = String(day);
+      const plan = weeklyPlanDraft[key] || {
+        enabled:true,
+        rooms:roomProfilesDraft.map(function(r){ return r.id; })
+      };
+
+      const card = document.createElement("div");
+      card.className = "day-plan";
+      card.dataset.planDay = key;
+
+      const title = document.createElement("div");
+      title.className = "row";
+      title.style.justifyContent = "space-between";
+      title.innerHTML =
+        '<b>' + PLAN_DAY_LABELS[day] + '</b>' +
+        '<label class="day-chip" style="margin:0">' +
+        '<input type="checkbox" data-day-enabled ' +
+        (plan.enabled !== false ? 'checked' : '') +
+        '>יום פעיל</label>';
+      card.appendChild(title);
+
+      const selected = new Map();
+      (plan.rooms || []).forEach(function(id, index) {
+        selected.set(Number(id), index + 1);
+      });
+
+      roomProfilesDraft.forEach(function(room) {
+        const item = document.createElement("div");
+        item.className = "day-room";
+        item.dataset.dayRoomId = String(room.id);
+        const order = selected.get(Number(room.id)) || "";
+
+        item.innerHTML =
+          '<input type="checkbox" data-day-room ' +
+          (selected.has(Number(room.id)) ? 'checked' : '') + '>' +
+          '<span>' + escapeHtml(room.name || ("חדר " + room.id)) +
+          ' <span class="muted">#' + room.id + '</span></span>' +
+          '<input type="number" min="1" max="99" data-day-order value="' +
+          escapeHtml(order) + '" placeholder="סדר">';
+        card.appendChild(item);
+      });
+
+      weekBox.appendChild(card);
+    });
+  }
+
+  function collectRoomPlanSettings() {
+    const profiles = [];
+
+    document
+      .querySelectorAll("#roomProfileRows [data-room-id]")
+      .forEach(function(row) {
+        profiles.push({
+          id:Number(row.dataset.roomId),
+          name:row.querySelector('[data-rp="name"]').value.trim(),
+          enabled:true,
+          mode:row.querySelector('[data-rp="mode"]').value,
+          geniusMode:row.querySelector('[data-rp="geniusMode"]').value,
+          suction:Number(row.querySelector('[data-rp="suction"]').value),
+          repeats:Number(row.querySelector('[data-rp="repeats"]').value)
+        });
+      });
+
+    const weekly = {};
+
+    document
+      .querySelectorAll("#weeklyPlanGrid [data-plan-day]")
+      .forEach(function(card) {
+        const items = [];
+
+        card.querySelectorAll("[data-day-room-id]").forEach(function(row) {
+          const checkbox = row.querySelector("[data-day-room]");
+          if (!checkbox.checked) return;
+
+          const orderValue =
+            Number(row.querySelector("[data-day-order]").value) || 999;
+
+          items.push({
+            id:Number(row.dataset.dayRoomId),
+            order:orderValue
+          });
+        });
+
+        items.sort(function(a,b) {
+          return a.order - b.order || a.id - b.id;
+        });
+
+        weekly[String(card.dataset.planDay)] = {
+          enabled:card.querySelector("[data-day-enabled]").checked,
+          rooms:items.map(function(item){ return item.id; })
+        };
+      });
+
+    roomProfilesDraft = profiles;
+    weeklyPlanDraft = weekly;
+
+    return {
+      roomProfiles:profiles,
+      weeklyPlan:weekly
+    };
+  }
+
+  function addRoomProfile() {
+    collectRoomPlanSettings();
+
+    const idText = prompt("Room ID חדש:");
+    if (idText === null) return;
+
+    const id = Number(idText);
+    if (!Number.isInteger(id) || id <= 0) {
+      toast("Room ID לא תקין", "bad");
+      return;
+    }
+
+    if (roomProfilesDraft.some(function(r){ return r.id === id; })) {
+      toast("Room ID כבר קיים", "bad");
+      return;
+    }
+
+    const name = prompt("שם החדר:", "חדר " + id);
+    if (name === null) return;
+
+    roomProfilesDraft.push({
+      id:id,
+      name:name.trim() || ("חדר " + id),
+      enabled:true,
+      mode:"cleangenius",
+      geniusMode:"1",
+      suction:2,
+      repeats:1
+    });
+
+    Object.keys(weeklyPlanDraft).forEach(function(key) {
+      const plan = weeklyPlanDraft[key];
+      if (plan && Array.isArray(plan.rooms)) {
+        plan.rooms.push(id);
+      }
+    });
+
+    renderRoomPlanEditor();
+  }
+
+  function removeRoomProfile(id) {
+    if (!confirm("למחוק את החדר מהפרופילים ומכל ימי השבוע?")) return;
+
+    collectRoomPlanSettings();
+    roomProfilesDraft =
+      roomProfilesDraft.filter(function(r){ return r.id !== Number(id); });
+
+    Object.keys(weeklyPlanDraft).forEach(function(key) {
+      weeklyPlanDraft[key].rooms =
+        (weeklyPlanDraft[key].rooms || [])
+          .filter(function(roomId){ return Number(roomId) !== Number(id); });
+    });
+
+    renderRoomPlanEditor();
+  }
+
   function fillSettings(s) {
     const ids = [
       "startTime","endTime","awayDelayMinutes","maxRunsPerDay",
@@ -453,6 +723,10 @@ export const dashboardHtml = String.raw`<!doctype html>
       if ($(id) && s[id] !== undefined) $(id).value = s[id];
     }
     $("dryRun").checked = Boolean(s.dryRun);
+    roomProfilesDraft = deepClone(s.roomProfiles || []);
+    weeklyPlanDraft = deepClone(s.weeklyPlan || {});
+    renderRoomPlanEditor();
+
     const selectedDays = new Set((s.wifeOnlyDays || [2,4]).map(Number));
     document.querySelectorAll('input[name="wifeOnlyDay"]').forEach((input) => {
       input.checked = selectedDays.has(Number(input.value));
@@ -498,6 +772,18 @@ export const dashboardHtml = String.raw`<!doctype html>
     const skipped = d.skipInfo?.date === d.localTime?.date;
     $("skipBtn").textContent = skipped ? "▶️ בטל דילוג" : "⏭️ דלג יום";
     $("skipBtn").className = skipped ? "btn good" : "btn warnb";
+
+    const todayPlan = d.config?.todayPlan || [];
+    $("todayPlanSummary").textContent =
+      todayPlan.length
+        ? "התוכנית להיום: " +
+          todayPlan.map(function(room) {
+            return room.name + " — " +
+              (room.mode === "vacuum"
+                ? ("שאיבה " + suctionLabel(room.suction) + " ×" + room.repeats)
+                : ("CleanGenius " + (room.geniusMode === "2" ? "Deep" : "Routine")));
+          }).join(" • ")
+        : "אין תוכנית ניקיון פעילה להיום";
 
     const presenceRule = d.config?.presenceModeToday === "wife_only"
       ? "👩 היום מספיק שבת הזוג בחוץ"
@@ -592,6 +878,7 @@ export const dashboardHtml = String.raw`<!doctype html>
 
   function readSettings() {
     const val = id => $(id).value.trim();
+    const planSettings = collectRoomPlanSettings();
     return {
       startTime: val("startTime"),
       endTime: val("endTime"),
@@ -602,6 +889,8 @@ export const dashboardHtml = String.raw`<!doctype html>
       eveningCheckTime: val("eveningCheckTime"),
       waterCheckTime: val("waterCheckTime"),
       timezone: val("timezone"),
+      roomProfiles:planSettings.roomProfiles,
+      weeklyPlan:planSettings.weeklyPlan,
       wifeOnlyDays: Array.from(
         document.querySelectorAll('input[name="wifeOnlyDay"]:checked')
       ).map((input) => Number(input.value)),

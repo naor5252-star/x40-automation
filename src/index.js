@@ -1,4 +1,12 @@
 import { dashboardHtml } from "./dashboard.js";
+import {
+  buildDefaultRoomProfiles,
+  normalizeRoomProfiles,
+  normalizeWeeklyPlan,
+  resolveDayPlan,
+  validateRoomProfiles,
+  validateWeeklyPlan,
+} from "./room-plan.js";
 
 const DEFAULT_PUBLIC_URL = "https://x40-automation.naor-5252.workers.dev";
 
@@ -72,6 +80,35 @@ export class PresenceState {
       this.value("cleanGeniusMode", "DREAME_CLEAN_GENIUS_MODE", "1")
     );
 
+    const baseRoomIds = String(
+      this.value(
+        "cleanGeniusRooms",
+        "DREAME_CLEAN_GENIUS_ROOMS",
+        "2,3,4,7,8"
+      )
+    );
+    const baseRoomLabels = String(
+      this.value(
+        "cleanGeniusLabel",
+        "DREAME_CLEAN_GENIUS_LABEL",
+        "סלון, חדר שינה ראשי 3, חדר שינה ראשי 2, משרד, מסדרון"
+      )
+    );
+
+    const roomProfiles = normalizeRoomProfiles(
+      this.value("roomProfiles", "DREAME_ROOM_PROFILES_JSON", null),
+      buildDefaultRoomProfiles(
+        baseRoomIds,
+        baseRoomLabels,
+        cleanGeniusMode
+      )
+    );
+
+    const weeklyPlan = normalizeWeeklyPlan(
+      this.value("weeklyPlan", "DREAME_WEEKLY_PLAN_JSON", null),
+      roomProfiles
+    );
+
     return {
       timezone: String(
         this.value("timezone", "TIMEZONE", "Asia/Jerusalem")
@@ -109,6 +146,9 @@ export class PresenceState {
         "WIFE_ONLY_DAYS",
         [2, 4]
       ),
+
+      roomProfiles,
+      weeklyPlan,
 
       primaryMode,
       shortcutName: String(
@@ -439,6 +479,44 @@ export class PresenceState {
       return Response.json({ ok: true, event });
     }
 
+    if (event.startsWith("plan-")) {
+      const details =
+        body?.details && typeof body.details === "object"
+          ? body.details
+          : {};
+
+      const completed = event === "plan-completed";
+      const aborted = event === "plan-aborted";
+      const fallback = event === "plan-fallback";
+
+      const updated = {
+        ...runInfo,
+        active:
+          completed || aborted
+            ? false
+            : runInfo.active,
+        fallbackUsed:
+          fallback ? true : Boolean(runInfo.fallbackUsed),
+        completedAt:
+          completed
+            ? new Date().toISOString()
+            : runInfo.completedAt,
+        abortedAt:
+          aborted
+            ? new Date().toISOString()
+            : runInfo.abortedAt,
+        planProgress: {
+          event,
+          details,
+          at: new Date().toISOString(),
+        },
+      };
+
+      await this.ctx.storage.put("runInfo", updated);
+      await this.appendEvent(event, details);
+      return Response.json({ ok: true, event });
+    }
+
     return new Response("Unknown event", { status: 400 });
   }
 
@@ -721,11 +799,26 @@ export class PresenceState {
   async forceRunNow() {
     const now = this.localNow();
     const config = this.effectiveConfig();
+    const roomPlan = resolveDayPlan(
+      config.roomProfiles,
+      config.weeklyPlan,
+      now.weekday
+    );
     const existing = await this.ctx.storage.get("runInfo");
     const runInfo =
       existing?.date === now.date
         ? existing
         : { date: now.date, count: 0 };
+
+    if (!roomPlan.length) {
+      const result = {
+        action: "no_plan_today",
+        forced: true,
+        localTime: now,
+      };
+      await this.appendEvent("dashboard_run_no_plan", {});
+      return result;
+    }
 
     if (config.dryRun) {
       const result = {
@@ -747,7 +840,7 @@ export class PresenceState {
       github = await this.dispatchGitHub(
         "smart-run",
         "",
-        { callbackToken, callbackUrl }
+        { callbackToken, callbackUrl, roomPlan }
       );
     } catch (err) {
       const result = {
@@ -767,6 +860,7 @@ export class PresenceState {
       actualRun: false,
       fallbackUsed: false,
       callbackToken,
+      roomPlan,
       forced: true,
     });
 
@@ -804,6 +898,12 @@ export class PresenceState {
     const config = this.effectiveConfig();
     const now = this.localNow();
     const wifeOnlyDay = config.wifeOnlyDays.includes(now.weekday);
+    const todayPlan = resolveDayPlan(
+      config.roomProfiles,
+      config.weeklyPlan,
+      now.weekday
+    );
+
 
     return {
       naor: naor ?? { state: "unknown" },
@@ -825,6 +925,10 @@ export class PresenceState {
         dryRun: config.dryRun,
         wifeOnlyDays: config.wifeOnlyDays,
         presenceModeToday: wifeOnlyDay ? "wife_only" : "both",
+        roomProfiles: config.roomProfiles,
+        weeklyPlan: config.weeklyPlan,
+        todayPlan,
+
 
         primaryMode: config.primaryMode,
         shortcutName:
@@ -999,6 +1103,23 @@ export class PresenceState {
       }
       out.wifeOnlyDays = days.sort((a, b) => a - b);
     }
+
+    if ("roomProfiles" in source) {
+      out.roomProfiles =
+        validateRoomProfiles(source.roomProfiles);
+    }
+
+    if ("weeklyPlan" in source) {
+      const profiles =
+        out.roomProfiles ||
+        this.effectiveConfig().roomProfiles;
+      out.weeklyPlan =
+        validateWeeklyPlan(
+          source.weeklyPlan,
+          profiles
+        );
+    }
+
 
     if ("timezone" in source) {
       const timezone = String(source.timezone || "").trim();
@@ -1191,6 +1312,8 @@ export class PresenceState {
             config.fallbackShortcutId,
           water_empty_codes:
             config.waterEmptyCodes,
+          room_plan_json:
+            JSON.stringify(extra.roomPlan || []),
         },
       }),
     });
@@ -1379,6 +1502,11 @@ export class PresenceState {
     const state = await this.getState();
     const now = this.localNow();
     const config = this.effectiveConfig();
+    const roomPlan = resolveDayPlan(
+      config.roomProfiles,
+      config.weeklyPlan,
+      now.weekday
+    );
 
     const skippedToday = state.skipInfo?.date === now.date;
     const wifeOnlyDay = config.wifeOnlyDays.includes(now.weekday);
@@ -1435,6 +1563,8 @@ export class PresenceState {
       localTime: now,
       action: "none",
       primaryMode: config.primaryMode,
+      roomPlan,
+      planRooms: roomPlan.map((room) => room.id),
     };
 
     if (skippedToday) {
@@ -1446,6 +1576,7 @@ export class PresenceState {
     }
 
     if (
+      roomPlan.length === 0 ||
       !presenceSatisfied ||
       !inWindow ||
       Number(runInfo.count || 0) >= maxRuns
@@ -1469,6 +1600,7 @@ export class PresenceState {
       github = await this.dispatchGitHub("smart-run", "", {
         callbackToken,
         callbackUrl: config.workerPublicUrl,
+        roomPlan,
       });
     } catch (err) {
       return this.saveDecision({
@@ -1486,6 +1618,7 @@ export class PresenceState {
       actualRun: false,
       fallbackUsed: false,
       callbackToken,
+      roomPlan,
       presenceMode,
       wifeOnlyDay,
     });

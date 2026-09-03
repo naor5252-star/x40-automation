@@ -70,6 +70,12 @@ on:
         default: "סלון, חדר שינה ראשי 3, חדר שינה ראשי 2, משרד, מסדרון"
         type: string
 
+      room_plan_json:
+        description: "Resolved room/day plan JSON"
+        required: false
+        default: ""
+        type: string
+
       fallback_shortcut_name:
         description: "Fallback shortcut name"
         required: false
@@ -131,7 +137,7 @@ jobs:
   dreame:
     name: Dreame Cloud
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 180
 
     steps:
       - name: Checkout
@@ -161,6 +167,9 @@ jobs:
           DREAME_CLEAN_GENIUS_ROOMS: ${{ inputs.clean_genius_rooms }}
           DREAME_CLEAN_GENIUS_MODE: ${{ inputs.clean_genius_mode }}
           DREAME_CLEAN_GENIUS_LABEL: ${{ inputs.clean_genius_label }}
+
+          DREAME_ROOM_PLAN_JSON: ${{ inputs.room_plan_json }}
+          DREAME_PLAN_PHASE_TIMEOUT_MINUTES: ${{ vars.DREAME_PLAN_PHASE_TIMEOUT_MINUTES || '75' }}
 
           DREAME_FALLBACK_SHORTCUT_NAME: ${{ inputs.fallback_shortcut_name }}
           DREAME_FALLBACK_SHORTCUT_ID: ${{ inputs.fallback_shortcut_id }}
@@ -234,7 +243,11 @@ jobs:
           fi
 
           if [ "$MODE" = "smart-run" ]; then
-            node scripts/smart-run.mjs
+            if [ -n "${DREAME_ROOM_PLAN_JSON:-}" ] && [ "${DREAME_ROOM_PLAN_JSON:-}" != "[]" ]; then
+              node scripts/plan-run.mjs
+            else
+              node scripts/smart-run.mjs
+            fi
             exit 0
           fi
 
