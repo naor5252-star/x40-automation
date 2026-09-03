@@ -107,6 +107,14 @@ export const dashboardHtml = String.raw`<!doctype html>
       min-height:44px; background:#0b1728;
     }
     .switchrow input { width:auto; transform:scale(1.15); }
+    .day-picker { display:flex; flex-wrap:wrap; gap:8px; margin-top:4px; }
+    .day-chip {
+      display:flex; align-items:center; gap:7px;
+      border:1px solid var(--line); background:#0b1728;
+      color:var(--text); border-radius:999px;
+      padding:8px 11px; margin:0; cursor:pointer; font-size:12px;
+    }
+    .day-chip input { width:auto; margin:0; accent-color:var(--blue); }
     .pill {
       border:1px solid var(--line);
       border-radius:999px; padding:5px 9px;
@@ -256,6 +264,20 @@ export const dashboardHtml = String.raw`<!doctype html>
         <div><label>שעת תזכורת ערב</label><input id="eveningCheckTime" type="time"></div>
         <div><label>שעת בדיקת מים</label><input id="waterCheckTime" type="time"></div>
         <div><label>Timezone</label><input id="timezone" type="text"></div>
+
+        <div style="grid-column:1/-1">
+          <label>ימים שבהם מספיק שרק בת הזוג בחוץ</label>
+          <div class="day-picker">
+            <label class="day-chip"><input type="checkbox" name="wifeOnlyDay" value="7">ראשון</label>
+            <label class="day-chip"><input type="checkbox" name="wifeOnlyDay" value="1">שני</label>
+            <label class="day-chip"><input type="checkbox" name="wifeOnlyDay" value="2">שלישי</label>
+            <label class="day-chip"><input type="checkbox" name="wifeOnlyDay" value="3">רביעי</label>
+            <label class="day-chip"><input type="checkbox" name="wifeOnlyDay" value="4">חמישי</label>
+            <label class="day-chip"><input type="checkbox" name="wifeOnlyDay" value="5">שישי</label>
+            <label class="day-chip"><input type="checkbox" name="wifeOnlyDay" value="6">שבת</label>
+          </div>
+          <p class="help">בימים המסומנים נאור יכול להיות בבית. ברירת המחדל: שלישי וחמישי.</p>
+        </div>
 
         <div>
           <label>מצב ניקיון ראשי</label>
@@ -407,6 +429,8 @@ export const dashboardHtml = String.raw`<!doctype html>
     if (!d) return "אין החלטה שמורה";
     const parts = [
       "action=" + (d.action || "none"),
+      "presenceMode=" + (d.presenceMode || "both"),
+      "presenceOK=" + Boolean(d.presenceSatisfied),
       "bothAway=" + Boolean(d.bothAway),
       "awayLongEnough=" + Boolean(d.awayLongEnough),
       "inWindow=" + Boolean(d.inWindow),
@@ -429,6 +453,10 @@ export const dashboardHtml = String.raw`<!doctype html>
       if ($(id) && s[id] !== undefined) $(id).value = s[id];
     }
     $("dryRun").checked = Boolean(s.dryRun);
+    const selectedDays = new Set((s.wifeOnlyDays || [2,4]).map(Number));
+    document.querySelectorAll('input[name="wifeOnlyDay"]').forEach((input) => {
+      input.checked = selectedDays.has(Number(input.value));
+    });
   }
 
   function render(d) {
@@ -471,7 +499,10 @@ export const dashboardHtml = String.raw`<!doctype html>
     $("skipBtn").textContent = skipped ? "▶️ בטל דילוג" : "⏭️ דלג יום";
     $("skipBtn").className = skipped ? "btn good" : "btn warnb";
 
-    $("decisionBox").textContent = actionText(d.lastDecision);
+    const presenceRule = d.config?.presenceModeToday === "wife_only"
+      ? "👩 היום מספיק שבת הזוג בחוץ"
+      : "👥 היום נדרש ששניכם בחוץ";
+    $("decisionBox").textContent = presenceRule + " • " + actionText(d.lastDecision);
 
     const i = d.integrations || {};
     $("integrationBox").innerHTML =
@@ -571,6 +602,9 @@ export const dashboardHtml = String.raw`<!doctype html>
       eveningCheckTime: val("eveningCheckTime"),
       waterCheckTime: val("waterCheckTime"),
       timezone: val("timezone"),
+      wifeOnlyDays: Array.from(
+        document.querySelectorAll('input[name="wifeOnlyDay"]:checked')
+      ).map((input) => Number(input.value)),
       primaryMode: val("primaryMode"),
       shortcutName: val("shortcutName"),
       shortcutId: val("shortcutId"),

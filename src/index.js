@@ -47,6 +47,22 @@ export class PresenceState {
     return String(value).toLowerCase() === "true";
   }
 
+  dayListValue(key, envKey, fallback = [2, 4]) {
+    const raw = this.value(key, envKey, fallback);
+    const values = Array.isArray(raw)
+      ? raw
+      : String(raw ?? "")
+          .split(",")
+          .map((x) => x.trim())
+          .filter(Boolean);
+
+    return [...new Set(
+      values
+        .map(Number)
+        .filter((n) => Number.isInteger(n) && n >= 1 && n <= 7)
+    )].sort((a, b) => a - b);
+  }
+
   effectiveConfig() {
     const primaryMode = String(
       this.value("primaryMode", "DREAME_PRIMARY_MODE", "cleangenius")
@@ -88,6 +104,11 @@ export class PresenceState {
         240
       ),
       dryRun: this.boolValue("dryRun", "DRY_RUN", true),
+      wifeOnlyDays: this.dayListValue(
+        "wifeOnlyDays",
+        "WIFE_ONLY_DAYS",
+        [2, 4]
+      ),
 
       primaryMode,
       shortcutName: String(
@@ -592,6 +613,22 @@ export class PresenceState {
       };
     }
 
+    if (
+      runInfo?.presenceMode === "wife_only" &&
+      returnedBy !== "wife"
+    ) {
+      await this.appendEvent("return_home_ignored", {
+        returnedBy,
+        presenceMode: runInfo.presenceMode,
+      });
+
+      return {
+        action: "return_home_ignored_wife_only_day",
+        returnedBy,
+        presenceMode: runInfo.presenceMode,
+      };
+    }
+
     const maxActiveMinutes =
       this.effectiveConfig().activeRunMaxMinutes;
 
@@ -765,6 +802,8 @@ export class PresenceState {
     ]);
 
     const config = this.effectiveConfig();
+    const now = this.localNow();
+    const wifeOnlyDay = config.wifeOnlyDays.includes(now.weekday);
 
     return {
       naor: naor ?? { state: "unknown" },
@@ -784,6 +823,8 @@ export class PresenceState {
         maxRunsPerDay: config.maxRunsPerDay,
         activeRunMaxMinutes: config.activeRunMaxMinutes,
         dryRun: config.dryRun,
+        wifeOnlyDays: config.wifeOnlyDays,
+        presenceModeToday: wifeOnlyDay ? "wife_only" : "both",
 
         primaryMode: config.primaryMode,
         shortcutName:
@@ -802,7 +843,7 @@ export class PresenceState {
           Boolean(config.fallbackShortcutId),
         waterEmptyCodes: config.waterEmptyCodes,
       },
-      localTime: this.localNow(),
+      localTime: now,
     };
   }
 
@@ -854,6 +895,7 @@ export class PresenceState {
       hour: "2-digit",
       minute: "2-digit",
       second: "2-digit",
+      weekday: "short",
       hour12: false,
     }).formatToParts(new Date());
 
@@ -861,11 +903,18 @@ export class PresenceState {
       parts.map((p) => [p.type, p.value])
     );
 
+    const weekdayMap = {
+      Mon: 1, Tue: 2, Wed: 3, Thu: 4,
+      Fri: 5, Sat: 6, Sun: 7,
+    };
+
     return {
       date: `${x.year}-${x.month}-${x.day}`,
       time: `${x.hour}:${x.minute}:${x.second}`,
       minuteOfDay:
         Number(x.hour) * 60 + Number(x.minute),
+      weekday: weekdayMap[x.weekday] || null,
+      weekdayShort: x.weekday || null,
     };
   }
 
@@ -938,6 +987,17 @@ export class PresenceState {
 
     if ("dryRun" in source) {
       out.dryRun = Boolean(source.dryRun);
+    }
+
+    if ("wifeOnlyDays" in source) {
+      if (!Array.isArray(source.wifeOnlyDays)) {
+        throw new Error("wifeOnlyDays must be an array");
+      }
+      const days = [...new Set(source.wifeOnlyDays.map(Number))];
+      if (!days.every((day) => Number.isInteger(day) && day >= 1 && day <= 7)) {
+        throw new Error("Invalid wifeOnlyDays");
+      }
+      out.wifeOnlyDays = days.sort((a, b) => a - b);
     }
 
     if ("timezone" in source) {
@@ -1320,60 +1380,54 @@ export class PresenceState {
     const now = this.localNow();
     const config = this.effectiveConfig();
 
-    const skippedToday =
-      state.skipInfo?.date === now.date;
+    const skippedToday = state.skipInfo?.date === now.date;
+    const wifeOnlyDay = config.wifeOnlyDays.includes(now.weekday);
+    const presenceMode = wifeOnlyDay ? "wife_only" : "both";
 
     const bothAway =
       state.naor?.state === "away" &&
       state.wife?.state === "away";
 
-    const awayDelayMs =
-      config.awayDelayMinutes * 60 * 1000;
-
+    const awayDelayMs = config.awayDelayMinutes * 60 * 1000;
     const nowMs = Date.now();
 
     const naorAwayLongEnough =
       state.naor?.state === "away" &&
-      Number.isFinite(
-        Date.parse(state.naor.updatedAt)
-      ) &&
-      nowMs - Date.parse(state.naor.updatedAt) >=
-        awayDelayMs;
+      Number.isFinite(Date.parse(state.naor.updatedAt)) &&
+      nowMs - Date.parse(state.naor.updatedAt) >= awayDelayMs;
 
     const wifeAwayLongEnough =
       state.wife?.state === "away" &&
-      Number.isFinite(
-        Date.parse(state.wife.updatedAt)
-      ) &&
-      nowMs - Date.parse(state.wife.updatedAt) >=
-        awayDelayMs;
+      Number.isFinite(Date.parse(state.wife.updatedAt)) &&
+      nowMs - Date.parse(state.wife.updatedAt) >= awayDelayMs;
 
-    const start = this.parseClock(
-      config.startTime,
-      "10:00"
-    );
-    const end = this.parseClock(
-      config.endTime,
-      "15:00"
-    );
+    const presenceSatisfied = wifeOnlyDay
+      ? wifeAwayLongEnough
+      : bothAway && naorAwayLongEnough && wifeAwayLongEnough;
 
-    const inWindow =
-      now.minuteOfDay >= start &&
-      now.minuteOfDay < end;
+    const requiredAwayLongEnough = wifeOnlyDay
+      ? wifeAwayLongEnough
+      : naorAwayLongEnough && wifeAwayLongEnough;
 
+    const start = this.parseClock(config.startTime, "10:00");
+    const end = this.parseClock(config.endTime, "15:00");
+    const inWindow = now.minuteOfDay >= start && now.minuteOfDay < end;
     const maxRuns = config.maxRunsPerDay;
 
-    const runInfo =
-      state.runInfo?.date === now.date
-        ? state.runInfo
-        : { date: now.date, count: 0 };
+    const runInfo = state.runInfo?.date === now.date
+      ? state.runInfo
+      : { date: now.date, count: 0 };
 
     const result = {
       reason,
       bothAway,
-      awayLongEnough:
-        naorAwayLongEnough &&
-        wifeAwayLongEnough,
+      wifeOnlyDay,
+      presenceMode,
+      presenceSatisfied,
+      requiredPeople: wifeOnlyDay ? ["wife"] : ["naor", "wife"],
+      awayLongEnough: requiredAwayLongEnough,
+      naorAwayLongEnough,
+      wifeAwayLongEnough,
       inWindow,
       runsToday: Number(runInfo.count || 0),
       maxRunsPerDay: maxRuns,
@@ -1392,11 +1446,9 @@ export class PresenceState {
     }
 
     if (
-      !bothAway ||
-      !naorAwayLongEnough ||
-      !wifeAwayLongEnough ||
+      !presenceSatisfied ||
       !inWindow ||
-      runInfo.count >= maxRuns
+      Number(runInfo.count || 0) >= maxRuns
     ) {
       return this.saveDecision(result);
     }
@@ -1405,26 +1457,19 @@ export class PresenceState {
       return this.saveDecision({
         ...result,
         action: "dry_run_would_dispatch",
-        cleanGeniusRooms:
-          config.cleanGeniusRooms,
-        cleanGeniusMode:
-          config.cleanGeniusMode,
+        cleanGeniusRooms: config.cleanGeniusRooms,
+        cleanGeniusMode: config.cleanGeniusMode,
       });
     }
 
-    const callbackToken =
-      crypto.randomUUID() + "-" + crypto.randomUUID();
+    const callbackToken = crypto.randomUUID() + "-" + crypto.randomUUID();
 
     let github;
     try {
-      github = await this.dispatchGitHub(
-        "smart-run",
-        "",
-        {
-          callbackToken,
-          callbackUrl: config.workerPublicUrl,
-        }
-      );
+      github = await this.dispatchGitHub("smart-run", "", {
+        callbackToken,
+        callbackUrl: config.workerPublicUrl,
+      });
     } catch (err) {
       return this.saveDecision({
         ...result,
@@ -1441,12 +1486,16 @@ export class PresenceState {
       actualRun: false,
       fallbackUsed: false,
       callbackToken,
+      presenceMode,
+      wifeOnlyDay,
     });
 
     await this.appendEvent("smart_run_dispatched", {
       reason,
       primaryMode: config.primaryMode,
       rooms: config.cleanGeniusRooms,
+      presenceMode,
+      wifeOnlyDay,
     });
 
     return this.saveDecision({
