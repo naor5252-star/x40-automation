@@ -174,6 +174,21 @@ export const dashboardHtml = String.raw`<!doctype html>
     .help { color:var(--muted); font-size:11px; line-height:1.55; }
     .dangerzone { border-color:#592b34; }
     .statusline { font-size:11px; color:var(--muted); margin-top:6px; }
+    .settings-savebar {
+      position:sticky; bottom:8px; z-index:80; margin-top:14px;
+      display:flex; align-items:center; justify-content:space-between; gap:10px;
+      padding:11px 12px; border:1px solid #7b5615; border-radius:14px;
+      background:rgba(73,52,17,.97); box-shadow:0 14px 36px rgba(0,0,0,.35);
+      backdrop-filter:blur(12px);
+    }
+    .settings-savebar .save-message { font-size:12px; font-weight:700; color:#ffd98a; }
+    .settings-savebar .save-sub { display:block; margin-top:2px; color:#d8bd87; font-size:10px; font-weight:500; }
+    .settings-clean { color:var(--green); border-color:#24683f; }
+    @media(max-width:560px) {
+      .settings-savebar { bottom:6px; align-items:stretch; flex-direction:column; }
+      .settings-savebar .row { width:100%; }
+      .settings-savebar .btn { flex:1; }
+    }
     @media(max-width:850px) {
       .grid4,.grid2,.fields { grid-template-columns:1fr 1fr; }
       .toolbar { grid-template-columns:1fr 1fr; }
@@ -364,10 +379,23 @@ export const dashboardHtml = String.raw`<!doctype html>
       </details>
 
       <div class="row section">
-        <button class="btn primary" onclick="saveSettings()">שמור פרמטרים</button>
+        <button id="saveSettingsBtn" class="btn primary" onclick="saveSettings()">✅ שמור</button>
+        <button id="discardSettingsBtn" class="btn ghost hidden" onclick="discardSettingsChanges()">בטל שינויים שלא נשמרו</button>
         <button class="btn ghost" onclick="resetSettings()">חזור לערכי Cloudflare</button>
+        <span id="settingsStatePill" class="pill settings-clean">✅ הכל שמור</span>
       </div>
       <p class="help">Secrets כגון סיסמת Dreame, Telegram Bot Token ו־GitHub token אינם מוצגים ואינם ניתנים לעריכה מה־WebUI.</p>
+    </div>
+
+    <div id="settingsSaveBar" class="settings-savebar hidden">
+      <div class="save-message">
+        ✏️ יש שינויים שלא נשמרו
+        <span class="save-sub">הרענון האוטומטי ממשיך, אבל השדות שאתה עורך לא יידרסו.</span>
+      </div>
+      <div class="row">
+        <button class="btn ghost" onclick="discardSettingsChanges()">בטל</button>
+        <button class="btn primary" onclick="saveSettings()">💾 שמור עכשיו</button>
+      </div>
     </div>
 
     <div class="card section">
@@ -399,6 +427,10 @@ export const dashboardHtml = String.raw`<!doctype html>
   let refreshTimer = null;
   let roomProfilesDraft = [];
   let weeklyPlanDraft = {};
+  let settingsDirty = false;
+  let settingsHydrated = false;
+  let savingSettings = false;
+  let latestServerSettings = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -458,6 +490,43 @@ export const dashboardHtml = String.raw`<!doctype html>
     localStorage.removeItem(TOKEN_KEY);
     clearInterval(refreshTimer);
     location.reload();
+  }
+
+  function updateSettingsSaveUI() {
+    const bar = $("settingsSaveBar");
+    const pill = $("settingsStatePill");
+    const discard = $("discardSettingsBtn");
+    const save = $("saveSettingsBtn");
+
+    if (bar) bar.classList.toggle("hidden", !settingsDirty);
+    if (discard) discard.classList.toggle("hidden", !settingsDirty);
+
+    if (pill) {
+      pill.textContent = settingsDirty ? "✏️ יש שינויים שלא נשמרו" : "✅ הכל שמור";
+      pill.classList.toggle("settings-clean", !settingsDirty);
+    }
+
+    if (save) {
+      save.textContent = savingSettings
+        ? "שומר…"
+        : settingsDirty ? "💾 שמור שינויים" : "✅ שמור";
+      save.disabled = savingSettings;
+    }
+  }
+
+  function markSettingsDirty() {
+    if (!settingsHydrated || savingSettings) return;
+    settingsDirty = true;
+    updateSettingsSaveUI();
+  }
+
+  async function discardSettingsChanges() {
+    if (settingsDirty && !confirm("לבטל את כל השינויים שעדיין לא נשמרו?")) return;
+    settingsDirty = false;
+    settingsHydrated = false;
+    updateSettingsSaveUI();
+    await refresh({forceSettings:true});
+    toast("השינויים שלא נשמרו בוטלו");
   }
 
   function stateText(person) {
@@ -691,6 +760,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       }
     });
 
+    markSettingsDirty();
     renderRoomPlanEditor();
   }
 
@@ -707,10 +777,12 @@ export const dashboardHtml = String.raw`<!doctype html>
           .filter(function(roomId){ return Number(roomId) !== Number(id); });
     });
 
+    markSettingsDirty();
     renderRoomPlanEditor();
   }
 
   function fillSettings(s) {
+    latestServerSettings = deepClone(s || {});
     const ids = [
       "startTime","endTime","awayDelayMinutes","maxRunsPerDay",
       "activeRunMaxMinutes","eveningCheckTime","waterCheckTime",
@@ -731,6 +803,8 @@ export const dashboardHtml = String.raw`<!doctype html>
     document.querySelectorAll('input[name="wifeOnlyDay"]').forEach((input) => {
       input.checked = selectedDays.has(Number(input.value));
     });
+    settingsHydrated = true;
+    updateSettingsSaveUI();
   }
 
   function render(d) {
@@ -798,7 +872,10 @@ export const dashboardHtml = String.raw`<!doctype html>
       "Repo: " + (i.github?.owner || "—") + "/" + (i.github?.repo || "—") +
       " • " + (i.github?.workflow || "—") + "@" + (i.github?.ref || "—");
 
-    fillSettings(d.effectiveSettings || {});
+    latestServerSettings = deepClone(d.effectiveSettings || {});
+    if (!settingsDirty || !settingsHydrated) {
+      fillSettings(latestServerSettings);
+    }
 
     const rows = (d.history || []).map(e => {
       const detail = JSON.stringify(e.details || {});
@@ -820,8 +897,12 @@ export const dashboardHtml = String.raw`<!doctype html>
       .replaceAll('"',"&quot;");
   }
 
-  async function refresh() {
+  async function refresh(options = {}) {
     const d = await api("/api/dashboard");
+    if (options.forceSettings) {
+      settingsDirty = false;
+      settingsHydrated = false;
+    }
     render(d);
     return d;
   }
@@ -912,15 +993,29 @@ export const dashboardHtml = String.raw`<!doctype html>
   }
 
   async function saveSettings() {
+    if (savingSettings) return;
     try {
+      const submitted = readSettings();
+      savingSettings = true;
+      updateSettingsSaveUI();
+
       const result = await api("/api/settings", {
         method:"PUT",
-        body:JSON.stringify(readSettings())
+        body:JSON.stringify(submitted)
       });
-      toast("הפרמטרים נשמרו", "ok");
-      await refresh();
+
+      settingsDirty = false;
+      settingsHydrated = false;
+      savingSettings = false;
+      updateSettingsSaveUI();
+
+      toast("✅ השינויים נשמרו", "ok");
+      await refresh({forceSettings:true});
       return result;
     } catch (err) {
+      savingSettings = false;
+      settingsDirty = true;
+      updateSettingsSaveUI();
       toast("שמירה נכשלה: " + err.message, "bad");
     }
   }
@@ -928,12 +1023,40 @@ export const dashboardHtml = String.raw`<!doctype html>
   async function resetSettings() {
     if (!confirm("למחוק את כל ה־overrides ולחזור לערכי Cloudflare?")) return;
     await doAction("/api/settings/reset", "מאפס הגדרות");
+    settingsDirty = false;
+    settingsHydrated = false;
+    updateSettingsSaveUI();
+    await refresh({forceSettings:true});
   }
 
   async function clearHistory() {
     if (!confirm("לנקות את היסטוריית האירועים?")) return;
     await doAction("/api/history/clear", "מנקה היסטוריה");
   }
+
+  function isSettingsEditorElement(target) {
+    if (!(target instanceof Element)) return false;
+    if (!target.matches("input,select,textarea")) return false;
+    return Boolean(
+      target.closest("#roomProfileRows") ||
+      target.closest("#weeklyPlanGrid") ||
+      target.closest(".fields") ||
+      target.matches('input[name="wifeOnlyDay"]')
+    );
+  }
+
+  function onSettingsFieldEdited(event) {
+    if (isSettingsEditorElement(event.target)) markSettingsDirty();
+  }
+
+  document.addEventListener("input", onSettingsFieldEdited);
+  document.addEventListener("change", onSettingsFieldEdited);
+
+  window.addEventListener("beforeunload", (event) => {
+    if (!settingsDirty) return;
+    event.preventDefault();
+    event.returnValue = "";
+  });
 
   window.addEventListener("load", async () => {
     if (!token()) return;
