@@ -193,13 +193,95 @@ async function writeProperty(siid, piid, value, label) {
   }
 }
 
+async function readFeatureConfig(retries = 3) {
+  let lastError = null;
+
+  for (let attempt = 1; attempt <= retries; attempt += 1) {
+    try {
+      const result = await client.getProperties(
+        String(device.did),
+        [{ siid: 4, piid: 50 }],
+        { timeoutMs: 15000 }
+      );
+
+      const prop = Array.isArray(result)
+        ? result.find((x) => Number(x?.siid) === 4 && Number(x?.piid) === 50) || result[0]
+        : null;
+
+      if (!prop || (prop.code !== undefined && Number(prop.code) !== 0)) {
+        throw new Error(`FEATURE_CONFIG read code=${prop?.code ?? "missing"}`);
+      }
+
+      const parsed = typeof prop.value === "string"
+        ? JSON.parse(prop.value)
+        : prop.value;
+
+      if (!Array.isArray(parsed)) {
+        throw new Error("FEATURE_CONFIG is not an array");
+      }
+
+      return parsed;
+    } catch (err) {
+      lastError = err;
+      console.log(`⚠️ FEATURE_CONFIG read ${attempt}/${retries}: ${err?.message || err}`);
+      if (attempt < retries) await new Promise((r) => setTimeout(r, 2500));
+    }
+  }
+
+  throw new Error(`Could not read FEATURE_CONFIG: ${lastError?.message || lastError}`);
+}
+
+function smartHostValue(entries) {
+  const item = entries.find((x) => String(x?.k) === "SmartHost");
+  return item ? Number(item.v) : null;
+}
+
+async function writeSmartHostVerified(mode) {
+  const desired = Number(mode);
+  if (![0, 1, 2].includes(desired)) throw new Error(`Invalid SmartHost mode: ${mode}`);
+
+  const current = await readFeatureConfig(3);
+  const before = smartHostValue(current);
+  let found = false;
+
+  const next = current.map((item) => {
+    if (String(item?.k) !== "SmartHost") return item;
+    found = true;
+    return { ...item, v: desired };
+  });
+
+  if (!found) next.push({ k: "SmartHost", v: desired });
+
+  console.log(`SmartHost before=${before ?? "missing"} -> requested=${desired} (${desired === 2 ? "Deep" : desired === 1 ? "Routine" : "Off"})`);
+
+  try {
+    await client.setProperties(
+      String(device.did),
+      [{ siid: 4, piid: 50, value: JSON.stringify(next) }],
+      { timeoutMs: 15000 }
+    );
+  } catch (err) {
+    const text = `${err?.name || ""} ${err?.message || ""}`;
+    if (err?.body?.code === 80001 || text.includes("80001") || text.includes("Offline")) {
+      console.log("⚠️ FEATURE_CONFIG write no HTTP ACK; verifying readback.");
+    } else {
+      throw err;
+    }
+  }
+
+  await new Promise((r) => setTimeout(r, 1500));
+  const verified = await readFeatureConfig(3);
+  const after = smartHostValue(verified);
+
+  if (after !== desired) {
+    throw new Error(`SmartHost verification failed: requested=${desired}, readback=${after}`);
+  }
+
+  console.log(`✅ SmartHost verified=${after} (${after === 2 ? "Deep" : after === 1 ? "Routine" : "Off"})`);
+}
+
 async function setSmartHost(mode) {
-  await writeProperty(
-    4,
-    50,
-    JSON.stringify({ k: "SmartHost", v: Number(mode) }),
-    `SmartHost=${mode}`
-  );
+  await writeSmartHostVerified(mode);
 }
 
 async function setCleanMode(mode) {
