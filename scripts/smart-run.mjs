@@ -329,6 +329,30 @@ async function setCleanGenius(mode) {
   return writeSmartHostDirect(desired, sub, 2);
 }
 
+async function setCleanGeniusSubMode(mode = 2) {
+  const value = Number(mode);
+  if (![2, 3].includes(value)) {
+    throw new Error(`Invalid CleanGenius sub-mode: ${mode}`);
+  }
+  try {
+    const result = await client.setProperties(
+      String(device.did),
+      [{ siid: 28, piid: 5, value }],
+      { timeoutMs: 15000 }
+    );
+    console.log(
+      `CleanGeniusSubMode=${value} (${value === 2 ? "Vac+Mop" : "MopAfterVac"}): ` +
+      JSON.stringify(result)
+    );
+  } catch (err) {
+    if (isNoAck(err)) {
+      console.log(`CleanGeniusSubMode=${value} no HTTP ACK; continuing.`);
+      return;
+    }
+    throw err;
+  }
+}
+
 async function sendShortcut(name, id) {
   try {
     await client.callAction(
@@ -351,7 +375,8 @@ async function startPrimary() {
     await sendShortcut(shortcutName, shortcutId);
     return;
   }
-  await setCleanGenius(cleanGeniusMode);
+  await setCleanGeniusSubMode(2);
+await setCleanGenius(cleanGeniusMode);
   await new Promise((r) => setTimeout(r, 800));
   const vacuum = client.getVacuum(device);
   try {

@@ -408,6 +408,18 @@ async function setCleanMode(mode) {
   await writeProperty(2, 6, Number(mode), `CleanMode=${mode}`);
 }
 
+async function setCleanGeniusSubMode(mode = 2) {
+  // siid 28 / piid 5: 2=Vac+Mop, 3=MopAfterVac
+  const value = Number(mode);
+  if (![2, 3].includes(value)) {
+    throw new Error(`Invalid CleanGenius sub-mode: ${mode}`);
+  }
+  await writeProperty(
+    28, 5, value,
+    `CleanGeniusSubMode=${value} (${value === 2 ? "Vac+Mop" : "MopAfterVac"})`
+  );
+}
+
 async function sendShortcut(name, id) {
   if (!id) throw new Error(`Shortcut ID missing for "${name}"`);
   try {
@@ -567,8 +579,13 @@ async function runPhase(phase, phaseIndex) {
 
   if (phase.mode === "cleangenius") {
     await setCleanMode(2);
+    await setCleanGeniusSubMode(2);
     await setSmartHost(Number(phase.geniusMode));
-    await sleep(800);
+    await sleep(1200);
+    console.log(
+      `Starting CleanGenius ${phase.geniusMode === "2" ? "Deep" : "Routine"} ` +
+      `as Vac+Mop for rooms: ${ids.join(",")}`
+    );
     const result = await vacuum.cleanSegments(ids);
     console.log(`CleanGenius cleanSegments: ${JSON.stringify(result)}`);
   } else {
