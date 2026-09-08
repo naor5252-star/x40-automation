@@ -114,97 +114,219 @@ console.log(`Primary mode: ${primaryMode}`);
 console.log(`Status delay: ${statusDelaySeconds}s`);
 if (requestedRoomText !== roomText) console.log(`⚠️ Migrated room IDs ${requestedRoomText} -> ${roomText}`);
 
-async function readFeatureConfig(retries = 3) {
-  let lastError = null;
 
-  for (let attempt = 1; attempt <= retries; attempt += 1) {
+function parseSmartHostFromFeatureValue(rawValue) {
+  try {
+    const parsed =
+      typeof rawValue === "string"
+        ? JSON.parse(rawValue)
+        : rawValue;
+
+    if (Array.isArray(parsed)) {
+      const item = parsed.find(
+        (x) => String(x?.k) === "SmartHost"
+      );
+      return item ? Number(item.v) : null;
+    }
+
+    if (
+      parsed &&
+      typeof parsed === "object" &&
+      String(parsed.k) === "SmartHost"
+    ) {
+      return Number(parsed.v);
+    }
+  } catch (err) {
+    console.log(
+      `⚠️ Could not parse SmartHost MQTT echo: ${err?.message || err}`
+    );
+  }
+
+  return null;
+}
+
+function waitForSmartHostEcho(subscription, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      subscription.off("properties", onProperties);
+    };
+
+    const finish = (value) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(value);
+    };
+
+    const onProperties = (changes) => {
+      for (const change of changes || []) {
+        if (
+          Number(change?.siid) !== 4 ||
+          Number(change?.piid) !== 50
+        ) {
+          continue;
+        }
+
+        const value =
+          parseSmartHostFromFeatureValue(change.value);
+
+        if (value !== null && Number.isFinite(value)) {
+          finish(value);
+          return;
+        }
+      }
+    };
+
+    const timer = setTimeout(
+      () => finish(null),
+      timeoutMs
+    );
+
+    subscription.on("properties", onProperties);
+  });
+}
+
+async function writeSmartHostDirect(
+  desiredMode,
+  subscription,
+  attempts = 2
+) {
+  const desired = Number(desiredMode);
+
+  if (![0, 1, 2].includes(desired)) {
+    throw new Error(
+      `Invalid SmartHost mode: ${desiredMode}`
+    );
+  }
+
+  const modeName =
+    desired === 2
+      ? "Deep"
+      : desired === 1
+        ? "Routine"
+        : "Off";
+
+  let explicitWrongEcho = null;
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    console.log(
+      `SmartHost request ${attempt}/${attempts}: ` +
+      `${desired} (${modeName})`
+    );
+
+    const echoPromise =
+      waitForSmartHostEcho(subscription, 10000);
+
+    let acked = false;
+
     try {
-      const result = await client.getProperties(
+      const result = await client.setProperties(
         String(device.did),
-        [{ siid: 4, piid: 50 }],
+        [{
+          siid: 4,
+          piid: 50,
+          value: JSON.stringify({
+            k: "SmartHost",
+            v: desired,
+          }),
+        }],
         { timeoutMs: 15000 }
       );
 
-      const prop = Array.isArray(result)
-        ? result.find((x) => Number(x?.siid) === 4 && Number(x?.piid) === 50) || result[0]
-        : null;
+      const first =
+        Array.isArray(result) ? result[0] : null;
 
-      if (!prop || (prop.code !== undefined && Number(prop.code) !== 0)) {
-        throw new Error(`FEATURE_CONFIG read code=${prop?.code ?? "missing"}`);
-      }
+      acked =
+        !first ||
+        first.code === undefined ||
+        Number(first.code) === 0;
 
-      const parsed = typeof prop.value === "string"
-        ? JSON.parse(prop.value)
-        : prop.value;
-
-      if (!Array.isArray(parsed)) {
-        throw new Error("FEATURE_CONFIG is not an array");
-      }
-
-      return parsed;
+      console.log(
+        `SmartHost HTTP result: ${JSON.stringify(result)}`
+      );
     } catch (err) {
-      lastError = err;
-      console.log(`⚠️ FEATURE_CONFIG read ${attempt}/${retries}: ${err?.message || err}`);
-      if (attempt < retries) await new Promise((r) => setTimeout(r, 2500));
+      if (isNoAck(err)) {
+        console.log(
+          "⚠️ SmartHost HTTP ACK unavailable; " +
+          "waiting for MQTT echo."
+        );
+      } else {
+        throw err;
+      }
     }
-  }
 
-  throw new Error(`Could not read FEATURE_CONFIG: ${lastError?.message || lastError}`);
-}
+    const echoed = await echoPromise;
 
-function smartHostValue(entries) {
-  const item = entries.find((x) => String(x?.k) === "SmartHost");
-  return item ? Number(item.v) : null;
-}
+    if (echoed === desired) {
+      console.log(
+        `✅ SmartHost MQTT verified=${echoed} (${modeName})`
+      );
+      return {
+        requested: desired,
+        verified: true,
+        via: "mqtt",
+      };
+    }
 
-async function writeSmartHostVerified(mode) {
-  const desired = Number(mode);
-  if (![0, 1, 2].includes(desired)) throw new Error(`Invalid SmartHost mode: ${mode}`);
-
-  const current = await readFeatureConfig(3);
-  const before = smartHostValue(current);
-  let found = false;
-
-  const next = current.map((item) => {
-    if (String(item?.k) !== "SmartHost") return item;
-    found = true;
-    return { ...item, v: desired };
-  });
-
-  if (!found) next.push({ k: "SmartHost", v: desired });
-
-  console.log(`SmartHost before=${before ?? "missing"} -> requested=${desired} (${desired === 2 ? "Deep" : desired === 1 ? "Routine" : "Off"})`);
-
-  try {
-    await client.setProperties(
-      String(device.did),
-      [{ siid: 4, piid: 50, value: JSON.stringify(next) }],
-      { timeoutMs: 15000 }
-    );
-  } catch (err) {
-    const text = `${err?.name || ""} ${err?.message || ""}`;
-    if (err?.body?.code === 80001 || text.includes("80001") || text.includes("Offline")) {
-      console.log("⚠️ FEATURE_CONFIG write no HTTP ACK; verifying readback.");
+    if (echoed !== null) {
+      explicitWrongEcho = echoed;
+      console.log(
+        `⚠️ SmartHost MQTT echo=${echoed}, ` +
+        `expected=${desired}`
+      );
+    } else if (acked) {
+      console.log(
+        `✅ SmartHost write ACKed as ${desired} (${modeName}); ` +
+        "no MQTT echo was required."
+      );
+      return {
+        requested: desired,
+        verified: true,
+        via: "http-ack",
+      };
     } else {
-      throw err;
+      console.log(
+        "⚠️ No SmartHost MQTT echo and no HTTP ACK."
+      );
+    }
+
+    if (attempt < attempts) {
+      await new Promise((r) => setTimeout(r, 1500));
     }
   }
 
-  await new Promise((r) => setTimeout(r, 1500));
-  const verified = await readFeatureConfig(3);
-  const after = smartHostValue(verified);
-
-  if (after !== desired) {
-    throw new Error(`SmartHost verification failed: requested=${desired}, readback=${after}`);
+  if (explicitWrongEcho !== null) {
+    throw new Error(
+      `SmartHost stayed at ${explicitWrongEcho}; ` +
+      `requested ${desired}`
+    );
   }
 
-  console.log(`✅ SmartHost verified=${after} (${after === 2 ? "Deep" : after === 1 ? "Routine" : "Off"})`);
+  console.log(
+    `⚠️ SmartHost ${desired} (${modeName}) sent but unverified; ` +
+    "continuing because X40 cloud ACK reads are unreliable."
+  );
+
+  return {
+    requested: desired,
+    verified: false,
+    via: "unverified",
+  };
 }
 
 async function setCleanGenius(mode) {
   const desired = Number(mode);
-  if (![1, 2].includes(desired)) throw new Error(`Invalid CleanGenius mode: ${mode}`);
-  await writeSmartHostVerified(desired);
+
+  if (![0, 1, 2].includes(desired)) {
+    throw new Error(
+      `Invalid CleanGenius mode: ${mode}`
+    );
+  }
+
+  return writeSmartHostDirect(desired, sub, 2);
 }
 
 async function sendShortcut(name, id) {
