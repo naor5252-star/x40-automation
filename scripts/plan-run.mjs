@@ -91,43 +91,49 @@ async function sendRunEvent(event, details = {}) {
   }
 }
 
-function samePhase(a, b) {
-  if (!a || !b || a.mode !== b.mode) return false;
-  if (a.mode === "cleangenius") {
-    return String(a.geniusMode) === String(b.geniusMode);
-  }
-  return (
-    Number(a.suction) === Number(b.suction) &&
-    Number(a.repeats) === Number(b.repeats)
-  );
-}
-
+// ONE ROOM = ONE PHASE / ONE ROBOT ACTION.
+// Do not merge adjacent rooms even when they have identical settings.
+// This keeps each room fully isolated: its own mode setup, its own
+// segment command, its own lifecycle completion, then the next room.
 function buildPhases(plan) {
   const phases = [];
+
   for (const room of plan) {
     const normalized = {
       id: Number(room.id),
       name: String(room.name || `חדר ${room.id}`),
-      mode: String(room.mode).toLowerCase() === "vacuum" ? "vacuum" : "cleangenius",
-      geniusMode: String(room.geniusMode) === "2" ? "2" : "1",
-      suction: Math.max(0, Math.min(3, Number(room.suction ?? 2))),
-      repeats: Math.max(1, Math.min(3, Number(room.repeats ?? 1))),
+      mode:
+        String(room.mode).toLowerCase() === "vacuum"
+          ? "vacuum"
+          : "cleangenius",
+      geniusMode:
+        String(room.geniusMode) === "2" ? "2" : "1",
+      suction: Math.max(
+        0,
+        Math.min(3, Number(room.suction ?? 2))
+      ),
+      repeats: Math.max(
+        1,
+        Math.min(3, Number(room.repeats ?? 1))
+      ),
     };
-    if (!Number.isInteger(normalized.id) || normalized.id <= 0) continue;
 
-    const last = phases.at(-1);
-    if (last && samePhase(last, normalized)) {
-      last.rooms.push(normalized);
-    } else {
-      phases.push({
-        mode: normalized.mode,
-        geniusMode: normalized.geniusMode,
-        suction: normalized.suction,
-        repeats: normalized.repeats,
-        rooms: [normalized],
-      });
+    if (
+      !Number.isInteger(normalized.id) ||
+      normalized.id <= 0
+    ) {
+      continue;
     }
+
+    phases.push({
+      mode: normalized.mode,
+      geniusMode: normalized.geniusMode,
+      suction: normalized.suction,
+      repeats: normalized.repeats,
+      rooms: [normalized],
+    });
   }
+
   return phases;
 }
 
@@ -680,6 +686,13 @@ await sendTelegram(
 let finalOutcome = { kind: "completed" };
 
 for (let i = 0; i < phases.length; i += 1) {
+  const room = phases[i].rooms[0];
+
+  console.log(
+    `ROOM ACTION ${i + 1}/${phases.length}: ` +
+    `${room.name} (ID ${room.id})`
+  );
+
   const outcome = await runPhase(phases[i], i);
 
   if (outcome.kind === "fallback") {
@@ -690,6 +703,13 @@ for (let i = 0; i < phases.length; i += 1) {
   if (outcome.kind !== "completed") {
     finalOutcome = outcome;
     break;
+  }
+
+  if (i < phases.length - 1) {
+    console.log(
+      "Room action completed; waiting 3s before next room."
+    );
+    await sleep(3000);
   }
 }
 
