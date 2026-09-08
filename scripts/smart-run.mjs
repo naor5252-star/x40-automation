@@ -353,6 +353,29 @@ async function setCleanGeniusSubMode(mode = 2) {
   }
 }
 
+async function setCustomizedCleaning(enabled) {
+  const value = enabled ? 1 : 0;
+  try {
+    const result = await client.setProperties(
+      String(device.did),
+      [{ siid: 4, piid: 26, value }],
+      { timeoutMs: 15000 }
+    );
+    console.log(
+      `CustomizedCleaning=${value} (${enabled ? "On" : "Off"}): ` +
+      JSON.stringify(result)
+    );
+  } catch (err) {
+    if (isNoAck(err)) {
+      console.log(
+        `CustomizedCleaning=${value} (${enabled ? "On" : "Off"}) no HTTP ACK; continuing.`
+      );
+      return;
+    }
+    throw err;
+  }
+}
+
 async function sendShortcut(name, id) {
   try {
     await client.callAction(
@@ -375,8 +398,10 @@ async function startPrimary() {
     await sendShortcut(shortcutName, shortcutId);
     return;
   }
+  await setCustomizedCleaning(false);
+  await new Promise((r) => setTimeout(r, 500));
   await setCleanGeniusSubMode(2);
-await setCleanGenius(cleanGeniusMode);
+  await setCleanGenius(cleanGeniusMode);
   await new Promise((r) => setTimeout(r, 800));
   const vacuum = client.getVacuum(device);
   try {

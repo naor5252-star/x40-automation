@@ -420,6 +420,21 @@ async function setCleanGeniusSubMode(mode = 2) {
   );
 }
 
+async function setCustomizedCleaning(enabled) {
+  // Dreame CUSTOMIZED_CLEANING: siid 4 / piid 26.
+  // When enabled, the robot uses its saved per-room settings and can
+  // ignore the mode/fan/water values sent by our room-plan runner.
+  // Our WebUI is the source of truth, so disable that competing layer.
+  const value = enabled ? 1 : 0;
+  await writeProperty(
+    4,
+    26,
+    value,
+    `CustomizedCleaning=${value} (${enabled ? "On" : "Off"})`
+  );
+}
+
+
 async function sendShortcut(name, id) {
   if (!id) throw new Error(`Shortcut ID missing for "${name}"`);
   try {
@@ -578,6 +593,11 @@ async function runPhase(phase, phaseIndex) {
   const waitPromise = waitForPhaseResult(phase, phaseIndex);
 
   if (phase.mode === "cleangenius") {
+    // Critical: disable Dreame's saved per-room customized-cleaning
+    // profile first. Otherwise it can override the GUI plan and force
+    // a room back to its previously saved vacuum-only configuration.
+    await setCustomizedCleaning(false);
+    await sleep(500);
     await setCleanMode(2);
     await setCleanGeniusSubMode(2);
     await setSmartHost(Number(phase.geniusMode));
@@ -589,6 +609,10 @@ async function runPhase(phase, phaseIndex) {
     const result = await vacuum.cleanSegments(ids);
     console.log(`CleanGenius cleanSegments: ${JSON.stringify(result)}`);
   } else {
+    // Keep customized cleaning off here too so explicit suction/repeats
+    // from the WebUI cannot be overridden by Dreame's saved room profile.
+    await setCustomizedCleaning(false);
+    await sleep(300);
     await setSmartHost(0);
     await setCleanMode(0);
     await sleep(800);
