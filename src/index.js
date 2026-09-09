@@ -1567,6 +1567,42 @@ export class PresenceState {
       planRooms: roomPlan.map((room) => room.id),
     };
 
+    // Never dispatch another scheduled smart-run while a plan is active.
+    // maxRunsPerDay still controls sequential runs; this prevents overlap.
+    if (runInfo.active) {
+      const lastRunMs = Date.parse(runInfo.lastRunAt || "");
+      const activeAgeMinutes = Number.isFinite(lastRunMs)
+        ? (Date.now() - lastRunMs) / 60000
+        : null;
+
+      const activeStillValid =
+        activeAgeMinutes === null ||
+        activeAgeMinutes <= config.activeRunMaxMinutes;
+
+      if (activeStillValid) {
+        return this.saveDecision({
+          ...result,
+          action: "run_already_active",
+          activeRunAgeMinutes:
+            activeAgeMinutes === null
+              ? null
+              : Math.round(activeAgeMinutes * 10) / 10,
+          activeRoomPlan: runInfo.roomPlan || [],
+          planProgress: runInfo.planProgress || null,
+        });
+      }
+
+      await this.ctx.storage.put("runInfo", {
+        ...runInfo,
+        active: false,
+        activeExpiredAt: new Date().toISOString(),
+      });
+
+      await this.appendEvent("active_run_expired", {
+        ageMinutes: Math.round(activeAgeMinutes),
+      });
+    }
+
     if (skippedToday) {
       return this.saveDecision({
         ...result,

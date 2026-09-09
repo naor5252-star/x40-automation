@@ -441,6 +441,326 @@ async function setCustomizedCleaning(enabled) {
 }
 
 
+function observedSettingValue(siid, piid, rawValue) {
+  if (Number(siid) === 4 && Number(piid) === 50) {
+    return parseSmartHostFromFeatureValue(rawValue);
+  }
+
+  const value = Number(rawValue);
+  return Number.isFinite(value) ? value : null;
+}
+
+function waitForSettingEcho(siid, piid, timeoutMs = 10000) {
+  return new Promise((resolve) => {
+    let settled = false;
+
+    const cleanup = () => {
+      clearTimeout(timer);
+      rawSub.off("properties", onProperties);
+    };
+
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
+      resolve(result);
+    };
+
+    const onProperties = (changes) => {
+      for (const change of changes || []) {
+        if (
+          Number(change?.siid) !== Number(siid) ||
+          Number(change?.piid) !== Number(piid)
+        ) {
+          continue;
+        }
+
+        const value = observedSettingValue(
+          siid,
+          piid,
+          change.value
+        );
+
+        if (value !== null) {
+          finish({ seen: true, value, via: "mqtt" });
+          return;
+        }
+      }
+    };
+
+    const timer = setTimeout(
+      () => finish({
+        seen: false,
+        value: null,
+        via: "mqtt-timeout",
+      }),
+      timeoutMs
+    );
+
+    rawSub.on("properties", onProperties);
+  });
+}
+
+async function readSettingBack(siid, piid) {
+  try {
+    const result = await client.getProperties(
+      String(device.did),
+      [{ siid, piid }],
+      { timeoutMs: 10000 }
+    );
+
+    const item = Array.isArray(result)
+      ? result.find(
+          (x) =>
+            Number(x?.siid) === Number(siid) &&
+            Number(x?.piid) === Number(piid) &&
+            (x?.code === undefined || Number(x.code) === 0)
+        )
+      : null;
+
+    if (!item || item.value === undefined) {
+      return {
+        seen: false,
+        value: null,
+        via: "readback-empty",
+      };
+    }
+
+    return {
+      seen: true,
+      value: observedSettingValue(siid, piid, item.value),
+      via: "readback",
+    };
+  } catch (err) {
+    console.log(
+      `Setting readback ${siid}/${piid} unavailable: ` +
+      `${err?.message || err}`
+    );
+    return {
+      seen: false,
+      value: null,
+      via: "readback-unavailable",
+    };
+  }
+}
+
+async function setAndVerifyRobotSetting({
+  siid,
+  piid,
+  desired,
+  writeValue = desired,
+  label,
+  attempts = 2,
+}) {
+  const expected = Number(desired);
+  let lastObserved = null;
+  let lastVia = "none";
+
+  for (let attempt = 1; attempt <= attempts; attempt += 1) {
+    console.log(
+      `VERIFY ${label} attempt ${attempt}/${attempts}: expected=${expected}`
+    );
+
+    // Attach before the write so a fast MQTT echo cannot be missed.
+    const echoPromise = waitForSettingEcho(siid, piid, 10000);
+
+    try {
+      const result = await client.setProperties(
+        String(device.did),
+        [{ siid, piid, value: writeValue }],
+        { timeoutMs: 10000 }
+      );
+      console.log(
+        `${label} write result: ${JSON.stringify(result)}`
+      );
+    } catch (err) {
+      if (isNoAck(err)) {
+        console.log(
+          `${label}: no HTTP ACK; requiring actual-state verification.`
+        );
+      } else {
+        throw err;
+      }
+    }
+
+    const mqtt = await echoPromise;
+
+    if (mqtt.seen) {
+      lastObserved = mqtt.value;
+      lastVia = mqtt.via;
+      console.log(`${label} MQTT actual=${mqtt.value}`);
+
+      if (Number(mqtt.value) === expected) {
+        console.log(
+          `STRICT CONFIG VERIFIED: ${label}=${expected} via MQTT`
+        );
+        return {
+          label,
+          desired: expected,
+          actual: mqtt.value,
+          verified: true,
+          via: "mqtt",
+        };
+      }
+    }
+
+    // A write ACK alone is deliberately not sufficient. Read actual state.
+    const readback = await readSettingBack(siid, piid);
+
+    if (readback.seen) {
+      lastObserved = readback.value;
+      lastVia = readback.via;
+      console.log(`${label} readback actual=${readback.value}`);
+
+      if (Number(readback.value) === expected) {
+        console.log(
+          `STRICT CONFIG VERIFIED: ${label}=${expected} via readback`
+        );
+        return {
+          label,
+          desired: expected,
+          actual: readback.value,
+          verified: true,
+          via: "readback",
+        };
+      }
+    }
+
+    if (attempt < attempts) {
+      await sleep(1200);
+    }
+  }
+
+  console.log(
+    `STRICT CONFIG FAILED: ${label}; expected=${expected}, ` +
+    `actual=${lastObserved === null ? "unknown" : lastObserved}, ` +
+    `via=${lastVia}`
+  );
+
+  return {
+    label,
+    desired: expected,
+    actual: lastObserved,
+    verified: false,
+    via: lastVia,
+  };
+}
+
+async function verifyCleanGeniusConfiguration(phase) {
+  const desiredSmartHost = Number(phase.geniusMode);
+
+  return [
+    await setAndVerifyRobotSetting({
+      siid: 4,
+      piid: 26,
+      desired: 0,
+      label: "CustomizedCleaning",
+    }),
+    await setAndVerifyRobotSetting({
+      siid: 2,
+      piid: 6,
+      desired: 2,
+      label: "CleanMode",
+    }),
+    await setAndVerifyRobotSetting({
+      siid: 28,
+      piid: 5,
+      desired: 2,
+      label: "CleanGeniusSubMode",
+    }),
+    await setAndVerifyRobotSetting({
+      siid: 4,
+      piid: 50,
+      desired: desiredSmartHost,
+      writeValue: JSON.stringify({
+        k: "SmartHost",
+        v: desiredSmartHost,
+      }),
+      label:
+        desiredSmartHost === 2
+          ? "SmartHost Deep"
+          : "SmartHost Routine",
+    }),
+  ];
+}
+
+async function verifyVacuumConfiguration() {
+  return [
+    await setAndVerifyRobotSetting({
+      siid: 4,
+      piid: 26,
+      desired: 0,
+      label: "CustomizedCleaning",
+    }),
+    await setAndVerifyRobotSetting({
+      siid: 4,
+      piid: 50,
+      desired: 0,
+      writeValue: JSON.stringify({
+        k: "SmartHost",
+        v: 0,
+      }),
+      label: "SmartHost Off",
+    }),
+    await setAndVerifyRobotSetting({
+      siid: 2,
+      piid: 6,
+      desired: 0,
+      label: "CleanMode Sweeping",
+    }),
+  ];
+}
+
+async function abortForUnverifiedConfiguration(
+  phase,
+  phaseIndex,
+  checks
+) {
+  const failed = checks.filter((x) => !x.verified);
+  const room = phase.rooms[0];
+
+  const outcome = {
+    kind: "config-unverified",
+    reason: "configuration-unverified",
+    roomId: room?.id ?? null,
+    roomName: room?.name || null,
+    failed: failed.map((x) => ({
+      label: x.label,
+      desired: x.desired,
+      actual: x.actual,
+      via: x.via,
+    })),
+  };
+
+  console.log(
+    "Refusing to start room because configuration was not verified: " +
+    JSON.stringify(outcome)
+  );
+
+  await sendRunEvent("plan-aborted", {
+    phaseIndex,
+    label: phaseLabel(phase),
+    outcome,
+  });
+
+  await sendTelegram(
+    [
+      "⚠️ החדר לא הופעל — הגדרות הרובוט לא אומתו",
+      `חדר: ${room?.name || room?.id || "לא ידוע"}`,
+      ...failed.map(
+        (x) =>
+          `${x.label}: רצוי ${x.desired}, ` +
+          `בפועל ${x.actual === null ? "לא התקבל" : x.actual}`
+      ),
+      "לא נשלחה פקודת ניקוי לחדר.",
+      `🕐 שעה: ${israelTime()}`,
+    ].join("\n")
+  );
+
+  return outcome;
+}
+
+
 async function sendShortcut(name, id) {
   if (!id) throw new Error(`Shortcut ID missing for "${name}"`);
   try {
@@ -578,7 +898,9 @@ async function runPhase(phase, phaseIndex) {
   const ids = phase.rooms.map((r) => r.id);
   const label = phaseLabel(phase);
 
-  console.log(`▶️ Phase ${phaseIndex + 1}/${phases.length}: ${label}`);
+  console.log(
+    `Phase ${phaseIndex + 1}/${phases.length}: ${label}`
+  );
 
   await sendRunEvent("plan-phase-started", {
     phaseIndex,
@@ -596,38 +918,48 @@ async function runPhase(phase, phaseIndex) {
     return fallbackForWater(phaseIndex);
   }
 
+  const checks =
+    phase.mode === "cleangenius"
+      ? await verifyCleanGeniusConfiguration(phase)
+      : await verifyVacuumConfiguration();
+
+  if (checks.some((x) => !x.verified)) {
+    return abortForUnverifiedConfiguration(
+      phase,
+      phaseIndex,
+      checks
+    );
+  }
+
+  console.log(
+    `ALL SETTINGS VERIFIED for room ${ids.join(",")}`
+  );
+
+  // Only after all required settings are confirmed do we arm lifecycle
+  // tracking and issue the actual room-cleaning command.
   const waitPromise = waitForPhaseResult(phase, phaseIndex);
 
   if (phase.mode === "cleangenius") {
-    // Critical: disable Dreame's saved per-room customized-cleaning
-    // profile first. Otherwise it can override the GUI plan and force
-    // a room back to its previously saved vacuum-only configuration.
-    await setCustomizedCleaning(false);
-    await sleep(500);
-    await setCleanMode(2);
-    await setCleanGeniusSubMode(2);
-    await setSmartHost(Number(phase.geniusMode));
-    await sleep(1200);
     console.log(
-      `Starting CleanGenius ${phase.geniusMode === "2" ? "Deep" : "Routine"} ` +
-      `as Vac+Mop for rooms: ${ids.join(",")}`
+      `Starting CleanGenius ` +
+      `${phase.geniusMode === "2" ? "Deep" : "Routine"} ` +
+      `as Vac+Mop for room: ${ids.join(",")}`
     );
+
     const result = await vacuum.cleanSegments(ids);
-    console.log(`CleanGenius cleanSegments: ${JSON.stringify(result)}`);
+    console.log(
+      `CleanGenius cleanSegments: ${JSON.stringify(result)}`
+    );
   } else {
-    // Keep customized cleaning off here too so explicit suction/repeats
-    // from the WebUI cannot be overridden by Dreame's saved room profile.
-    await setCustomizedCleaning(false);
-    await sleep(300);
-    await setSmartHost(0);
-    await setCleanMode(0);
-    await sleep(800);
     const result = await vacuum.cleanSegments(ids, {
       repeats: phase.repeats,
       fan: phase.suction,
       water: 0,
     });
-    console.log(`Vacuum-only cleanSegments: ${JSON.stringify(result)}`);
+
+    console.log(
+      `Vacuum-only cleanSegments: ${JSON.stringify(result)}`
+    );
   }
 
   await sendRunEvent("primary-active", {
@@ -656,6 +988,7 @@ async function runPhase(phase, phaseIndex) {
         `🕐 שעה: ${israelTime()}`,
       ].join("\n")
     );
+
     return outcome;
   }
 
