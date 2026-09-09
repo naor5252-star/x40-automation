@@ -446,6 +446,13 @@ function observedSettingValue(siid, piid, rawValue) {
     return parseSmartHostFromFeatureValue(rawValue);
   }
 
+  // X40 writes clean mode at 2/6, but mirrors actual mode at
+  // 4/23 with capability bits. Low 2 bits are CleaningMode.
+  if (Number(siid) === 4 && Number(piid) === 23) {
+    const packed = Number(rawValue);
+    return Number.isFinite(packed) ? (packed & 0x3) : null;
+  }
+
   const value = Number(rawValue);
   return Number.isFinite(value) ? value : null;
 }
@@ -549,6 +556,8 @@ async function setAndVerifyRobotSetting({
   piid,
   desired,
   writeValue = desired,
+  verifySiid = siid,
+  verifyPiid = piid,
   label,
   attempts = 2,
 }) {
@@ -562,7 +571,7 @@ async function setAndVerifyRobotSetting({
     );
 
     // Attach before the write so a fast MQTT echo cannot be missed.
-    const echoPromise = waitForSettingEcho(siid, piid, 10000);
+    const echoPromise = waitForSettingEcho(verifySiid, verifyPiid, 10000);
 
     try {
       const result = await client.setProperties(
@@ -605,7 +614,7 @@ async function setAndVerifyRobotSetting({
     }
 
     // A write ACK alone is deliberately not sufficient. Read actual state.
-    const readback = await readSettingBack(siid, piid);
+    const readback = await readSettingBack(verifySiid, verifyPiid);
 
     if (readback.seen) {
       lastObserved = readback.value;
@@ -660,6 +669,8 @@ async function verifyCleanGeniusConfiguration(phase) {
       siid: 2,
       piid: 6,
       desired: 2,
+      verifySiid: 4,
+      verifyPiid: 23,
       label: "CleanMode",
     }),
     await setAndVerifyRobotSetting({
@@ -706,6 +717,8 @@ async function verifyVacuumConfiguration() {
       siid: 2,
       piid: 6,
       desired: 0,
+      verifySiid: 4,
+      verifyPiid: 23,
       label: "CleanMode Sweeping",
     }),
   ];

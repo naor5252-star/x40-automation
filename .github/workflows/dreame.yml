@@ -15,6 +15,7 @@ on:
         type: choice
         options:
           - capture
+          - capture-cleangenius
           - map-rooms
           - list
           - run-id
@@ -219,6 +220,11 @@ jobs:
 
           if [ "$MODE" = "telegram-flow-test" ]; then
             node scripts/telegram-flow-test.mjs
+            exit 0
+          fi
+
+          if [ "$MODE" = "capture-cleangenius" ]; then
+            node scripts/capture-cleangenius.mjs
             exit 0
           fi
 

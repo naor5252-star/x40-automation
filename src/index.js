@@ -505,6 +505,18 @@ export class PresenceState {
           aborted
             ? new Date().toISOString()
             : runInfo.abortedAt,
+        automaticRetryBlocked:
+          aborted
+            ? true
+            : completed
+              ? false
+              : Boolean(runInfo.automaticRetryBlocked),
+        retryBlockedAt:
+          aborted
+            ? new Date().toISOString()
+            : completed
+              ? null
+              : runInfo.retryBlockedAt,
         planProgress: {
           event,
           details,
@@ -603,6 +615,26 @@ export class PresenceState {
       previousPresence?.state !== "home"
     ) {
       returnHome = await this.stopIfActive(person);
+    }
+
+    if (state === "home") {
+      const latestRunInfo =
+        await this.ctx.storage.get("runInfo");
+
+      if (latestRunInfo?.automaticRetryBlocked) {
+        await this.ctx.storage.put("runInfo", {
+          ...latestRunInfo,
+          automaticRetryBlocked: false,
+          retryBlockedAt: null,
+          automaticRetryResetAt: new Date().toISOString(),
+          automaticRetryResetBy: person,
+        });
+
+        await this.appendEvent("automatic_retry_reset", {
+          person,
+          source,
+        });
+      }
     }
 
     const check =
@@ -859,6 +891,8 @@ export class PresenceState {
       active: true,
       actualRun: false,
       fallbackUsed: false,
+      automaticRetryBlocked: false,
+      retryBlockedAt: null,
       callbackToken,
       roomPlan,
       forced: true,
@@ -1603,6 +1637,15 @@ export class PresenceState {
       });
     }
 
+    if (runInfo.automaticRetryBlocked) {
+      return this.saveDecision({
+        ...result,
+        action: "automatic_retry_blocked_after_abort",
+        retryBlockedAt: runInfo.retryBlockedAt || null,
+        lastAbortAt: runInfo.abortedAt || null,
+      });
+    }
+
     if (skippedToday) {
       return this.saveDecision({
         ...result,
@@ -1653,6 +1696,8 @@ export class PresenceState {
       active: true,
       actualRun: false,
       fallbackUsed: false,
+      automaticRetryBlocked: false,
+      retryBlockedAt: null,
       callbackToken,
       roomPlan,
       presenceMode,
