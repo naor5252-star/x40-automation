@@ -907,6 +907,325 @@ function waitForPhaseResult(phase, phaseIndex) {
   });
 }
 
+
+function createRuntimeConfigMonitor(phase) {
+  const desired = phase.mode === "cleangenius"
+    ? {
+        customizedCleaning: 0,
+        cleanMode: 2,
+        cleanGeniusSubMode: 2,
+        smartHost: Number(phase.geniusMode),
+      }
+    : {
+        customizedCleaning: 0,
+        cleanMode: 0,
+        smartHost: 0,
+      };
+
+  const observed = {
+    customizedCleaning: null,
+    cleanMode: null,
+    cleanGeniusSubMode: null,
+    smartHost: null,
+  };
+
+  const seenAt = {};
+  const runtimeStartedAt = { value: null };
+
+  const update = (key, value) => {
+    const n = Number(value);
+    if (!Number.isFinite(n)) return;
+
+    observed[key] = n;
+    seenAt[key] = Date.now();
+
+    const expected = desired[key];
+    console.log(
+      `RUNTIME CONFIG ${key}: actual=${n}` +
+      `${expected === undefined ? "" : ` expected=${expected}`}`
+    );
+  };
+
+  const onProperties = (changes) => {
+    for (const change of changes || []) {
+      const siid = Number(change?.siid);
+      const piid = Number(change?.piid);
+
+      if (siid === 4 && piid === 26) {
+        update("customizedCleaning", change.value);
+        continue;
+      }
+
+      if (siid === 4 && piid === 23) {
+        const packed = Number(change.value);
+        if (Number.isFinite(packed)) {
+          console.log(
+            `RUNTIME CONFIG cleaningMode packed=${packed} lowBits=${packed & 0x3}`
+          );
+          update("cleanMode", packed & 0x3);
+        }
+        continue;
+      }
+
+      if (siid === 28 && piid === 5) {
+        update("cleanGeniusSubMode", change.value);
+        continue;
+      }
+
+      if (siid === 4 && piid === 50) {
+        const value =
+          parseSmartHostFromFeatureValue(change.value);
+        if (value !== null) {
+          update("smartHost", value);
+        }
+      }
+    }
+  };
+
+  rawSub.on("properties", onProperties);
+
+  return {
+    desired,
+    observed,
+    seenAt,
+
+    markRuntimeStart() {
+      runtimeStartedAt.value = Date.now();
+    },
+
+    snapshot() {
+      return {
+        desired: { ...desired },
+        observed: { ...observed },
+        runtimeStartedAt: runtimeStartedAt.value,
+      };
+    },
+
+    close() {
+      rawSub.off("properties", onProperties);
+    },
+  };
+}
+
+async function writeSmartHostBestEffort(mode) {
+  const desired = Number(mode);
+  const name =
+    desired === 2
+      ? "Deep"
+      : desired === 1
+        ? "Routine"
+        : "Off";
+
+  try {
+    const result = await client.setProperties(
+      String(device.did),
+      [{
+        siid: 4,
+        piid: 50,
+        value: JSON.stringify({
+          k: "SmartHost",
+          v: desired,
+        }),
+      }],
+      { timeoutMs: 10000 }
+    );
+
+    console.log(
+      `SmartHost=${desired} (${name}) write: ${JSON.stringify(result)}`
+    );
+  } catch (err) {
+    if (isNoAck(err)) {
+      console.log(
+        `SmartHost=${desired} (${name}) no HTTP ACK; ` +
+        "continuing to runtime verification."
+      );
+      return;
+    }
+    throw err;
+  }
+}
+
+async function applyPhaseConfigurationBestEffort(phase) {
+  if (phase.mode === "cleangenius") {
+    console.log(
+      "Applying CleanGenius configuration before start " +
+      "(ACK is not required at this stage)."
+    );
+
+    await setCustomizedCleaning(false);
+    await sleep(300);
+    await setCleanMode(2);
+    await setCleanGeniusSubMode(2);
+    await writeSmartHostBestEffort(
+      Number(phase.geniusMode)
+    );
+    await sleep(500);
+    return;
+  }
+
+  console.log(
+    "Applying vacuum-only configuration before start " +
+    "(ACK is not required at this stage)."
+  );
+
+  await setCustomizedCleaning(false);
+  await sleep(250);
+  await writeSmartHostBestEffort(0);
+  await setCleanMode(0);
+  await sleep(500);
+}
+
+async function verifyRuntimeConfiguration(
+  phase,
+  monitor,
+  timeoutMs = 25000
+) {
+  const deadline = Date.now() + timeoutMs;
+
+  const requiredKeys = phase.mode === "cleangenius"
+    ? [
+        "customizedCleaning",
+        "cleanMode",
+        "cleanGeniusSubMode",
+        "smartHost",
+      ]
+    : [
+        "customizedCleaning",
+        "cleanMode",
+        "smartHost",
+      ];
+
+  while (Date.now() < deadline) {
+    const snap = monitor.snapshot();
+
+    const allKnown = requiredKeys.every(
+      (key) => snap.observed[key] !== null
+    );
+
+    const allMatch =
+      allKnown &&
+      requiredKeys.every(
+        (key) =>
+          Number(snap.observed[key]) ===
+          Number(snap.desired[key])
+      );
+
+    if (allMatch) {
+      console.log(
+        "RUNTIME CONFIG VERIFIED: all reported settings match."
+      );
+      return {
+        kind: "verified",
+        desired: snap.desired,
+        observed: snap.observed,
+      };
+    }
+
+    await sleep(500);
+  }
+
+  const snap = monitor.snapshot();
+
+  const mismatches = requiredKeys
+    .filter(
+      (key) =>
+        snap.observed[key] !== null &&
+        Number(snap.observed[key]) !==
+          Number(snap.desired[key])
+    )
+    .map((key) => ({
+      key,
+      desired: snap.desired[key],
+      actual: snap.observed[key],
+    }));
+
+  const unknown = requiredKeys.filter(
+    (key) => snap.observed[key] === null
+  );
+
+  if (mismatches.length) {
+    console.log(
+      "RUNTIME CONFIG MISMATCH: " +
+      JSON.stringify({ mismatches, unknown })
+    );
+
+    return {
+      kind: "mismatch",
+      desired: snap.desired,
+      observed: snap.observed,
+      mismatches,
+      unknown,
+    };
+  }
+
+  console.log(
+    "RUNTIME CONFIG PARTIALLY VERIFIED: " +
+    JSON.stringify({
+      desired: snap.desired,
+      observed: snap.observed,
+      unknown,
+    })
+  );
+
+  // X40/r2416a does not always echo every persistent setting.
+  // Absence of an echo is not treated as failure. Only an explicit
+  // conflicting value is considered a mismatch.
+  return {
+    kind: unknown.length
+      ? "partial"
+      : "verified",
+    desired: snap.desired,
+    observed: snap.observed,
+    unknown,
+  };
+}
+
+async function cancelForRuntimeMismatch(
+  phase,
+  phaseIndex,
+  verification
+) {
+  const room = phase.rooms[0];
+
+  console.log(
+    "Cancelling room due to explicit runtime configuration mismatch."
+  );
+
+  try {
+    await vacuum.cancelCurrentJob();
+  } catch (err) {
+    console.log(
+      `Cancel after runtime mismatch: ${err?.message || err}`
+    );
+  }
+
+  const outcome = {
+    kind: "config-mismatch",
+    reason: "runtime-configuration-mismatch",
+    roomId: room?.id ?? null,
+    roomName: room?.name || null,
+    mismatches: verification.mismatches || [],
+    unknown: verification.unknown || [],
+    observed: verification.observed || {},
+    desired: verification.desired || {},
+  };
+
+  await sendTelegram(
+    [
+      "⚠️ הופסק ניקוי בגלל אי־התאמה במצב הרובוט",
+      `חדר: ${room?.name || room?.id || "לא ידוע"}`,
+      ...(outcome.mismatches || []).map(
+        (x) =>
+          `${x.key}: רצוי ${x.desired}, בפועל ${x.actual}`
+      ),
+      `🕐 שעה: ${israelTime()}`,
+    ].join("\n")
+  );
+
+  return outcome;
+}
+
+
 async function runPhase(phase, phaseIndex) {
   const ids = phase.rooms.map((r) => r.id);
   const label = phaseLabel(phase);
@@ -931,89 +1250,120 @@ async function runPhase(phase, phaseIndex) {
     return fallbackForWater(phaseIndex);
   }
 
-  const checks =
-    phase.mode === "cleangenius"
-      ? await verifyCleanGeniusConfiguration(phase)
-      : await verifyVacuumConfiguration();
+  // Important X40 behavior:
+  // some configuration properties are not echoed until a real task
+  // begins. Therefore we configure first, START the single room, and
+  // only then judge the device's reported runtime state.
+  const monitor = createRuntimeConfigMonitor(phase);
 
-  if (checks.some((x) => !x.verified)) {
-    return abortForUnverifiedConfiguration(
-      phase,
+  try {
+    await applyPhaseConfigurationBestEffort(phase);
+
+    // Arm lifecycle tracking before START_CUSTOM.
+    const waitPromise =
+      waitForPhaseResult(phase, phaseIndex);
+
+    // Mark immediately before issuing the start command so fast MQTT
+    // state transitions are captured even if HTTP returns no ACK later.
+    monitor.markRuntimeStart();
+
+    if (phase.mode === "cleangenius") {
+      console.log(
+        `Starting CleanGenius ` +
+        `${phase.geniusMode === "2" ? "Deep" : "Routine"} ` +
+        `as Vac+Mop for room: ${ids.join(",")}`
+      );
+
+      const result = await vacuum.cleanSegments(ids);
+      console.log(
+        `CleanGenius cleanSegments: ${JSON.stringify(result)}`
+      );
+    } else {
+      console.log(
+        `Starting vacuum-only for room: ${ids.join(",")} ` +
+        `fan=${phase.suction} repeats=${phase.repeats}`
+      );
+
+      const result = await vacuum.cleanSegments(ids, {
+        repeats: phase.repeats,
+        fan: phase.suction,
+        water: 0,
+      });
+
+      console.log(
+        `Vacuum-only cleanSegments: ${JSON.stringify(result)}`
+      );
+    }
+
+    await sendRunEvent("primary-active", {
       phaseIndex,
-      checks
-    );
-  }
-
-  console.log(
-    `ALL SETTINGS VERIFIED for room ${ids.join(",")}`
-  );
-
-  // Only after all required settings are confirmed do we arm lifecycle
-  // tracking and issue the actual room-cleaning command.
-  const waitPromise = waitForPhaseResult(phase, phaseIndex);
-
-  if (phase.mode === "cleangenius") {
-    console.log(
-      `Starting CleanGenius ` +
-      `${phase.geniusMode === "2" ? "Deep" : "Routine"} ` +
-      `as Vac+Mop for room: ${ids.join(",")}`
-    );
-
-    const result = await vacuum.cleanSegments(ids);
-    console.log(
-      `CleanGenius cleanSegments: ${JSON.stringify(result)}`
-    );
-  } else {
-    const result = await vacuum.cleanSegments(ids, {
-      repeats: phase.repeats,
-      fan: phase.suction,
-      water: 0,
+      mode: phase.mode,
     });
 
+    const verification =
+      await verifyRuntimeConfiguration(
+        phase,
+        monitor,
+        25000
+      );
+
     console.log(
-      `Vacuum-only cleanSegments: ${JSON.stringify(result)}`
+      "RUNTIME CONFIG RESULT: " +
+      JSON.stringify(verification)
     );
-  }
 
-  await sendRunEvent("primary-active", {
-    phaseIndex,
-    mode: phase.mode,
-  });
+    if (verification.kind === "mismatch") {
+      return cancelForRuntimeMismatch(
+        phase,
+        phaseIndex,
+        verification
+      );
+    }
 
-  const outcome = await waitPromise;
+    if (verification.kind === "partial") {
+      console.log(
+        "Runtime config has no explicit mismatch; " +
+        "continuing despite missing X40 echoes."
+      );
+    }
 
-  if (outcome.kind === "water") {
-    return fallbackForWater(phaseIndex);
-  }
+    const outcome = await waitPromise;
 
-  if (outcome.kind !== "completed") {
-    await sendRunEvent("plan-aborted", {
+    if (outcome.kind === "water") {
+      return fallbackForWater(phaseIndex);
+    }
+
+    if (outcome.kind !== "completed") {
+      await sendRunEvent("plan-aborted", {
+        phaseIndex,
+        label,
+        outcome,
+      });
+
+      await sendTelegram(
+        [
+          "⚠️ תוכנית החדרים הופסקה",
+          `שלב: ${label}`,
+          `סיבה: ${outcome.reason || outcome.kind}`,
+          `🕐 שעה: ${israelTime()}`,
+        ].join("\n")
+      );
+
+      return outcome;
+    }
+
+    await sendRunEvent("plan-phase-completed", {
       phaseIndex,
+      phaseNumber: phaseIndex + 1,
+      phaseCount: phases.length,
       label,
-      outcome,
+      roomIds: ids,
     });
-
-    await sendTelegram(
-      [
-        "⚠️ תוכנית החדרים הופסקה",
-        `שלב: ${label}`,
-        `סיבה: ${outcome.reason || outcome.kind}`,
-        `🕐 שעה: ${israelTime()}`,
-      ].join("\n")
-    );
 
     return outcome;
+  } finally {
+    monitor.close();
   }
-
-  await sendRunEvent("plan-phase-completed", {
-    phaseIndex,
-    phaseNumber: phaseIndex + 1,
-    phaseCount: phases.length,
-    label,
-    roomIds: ids,
-  });
-
-  return outcome;
 }
 
 await sendRunEvent("plan-started", {
