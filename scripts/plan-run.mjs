@@ -840,17 +840,24 @@ function waitForPhaseResult(phase, phaseIndex) {
   const armedAt = Date.now();
   const timeoutMs = phaseTimeoutMinutes * 60 * 1000;
 
-  return new Promise((resolve) => {
+  let cancelExternal = () => {};
+
+  const promise = new Promise((resolve) => {
     let settled = false;
     let startedSeen = false;
+    let timer = null;
 
     const done = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      if (timer) clearTimeout(timer);
       vacuum.off("taskLifecycle", onLifecycle);
       vacuum.off("change", onChange);
       resolve(result);
+    };
+
+    cancelExternal = (reason = "cancelled") => {
+      done({ kind: "cancelled", reason, phaseIndex });
     };
 
     const onLifecycle = (event) => {
@@ -894,7 +901,7 @@ function waitForPhaseResult(phase, phaseIndex) {
       }
     };
 
-    const timer = setTimeout(() => {
+    timer = setTimeout(() => {
       done({
         kind: "timeout",
         phaseIndex,
@@ -905,6 +912,9 @@ function waitForPhaseResult(phase, phaseIndex) {
     vacuum.on("taskLifecycle", onLifecycle);
     vacuum.on("change", onChange);
   });
+
+  promise.cancel = (reason) => cancelExternal(reason);
+  return promise;
 }
 
 
@@ -1082,42 +1092,47 @@ async function verifyRuntimeConfiguration(
 ) {
   const deadline = Date.now() + timeoutMs;
 
-  const requiredKeys = phase.mode === "cleangenius"
-    ? [
-        "customizedCleaning",
-        "cleanMode",
-        "cleanGeniusSubMode",
-        "smartHost",
-      ]
-    : [
-        "customizedCleaning",
-        "cleanMode",
-        "smartHost",
-      ];
+  const strictKeys =
+    phase.mode === "cleangenius"
+      ? ["customizedCleaning", "smartHost"]
+      : ["customizedCleaning", "cleanMode", "smartHost"];
+
+  const diagnosticKeys =
+    phase.mode === "cleangenius"
+      ? ["cleanMode", "cleanGeniusSubMode"]
+      : [];
 
   while (Date.now() < deadline) {
     const snap = monitor.snapshot();
 
-    const allKnown = requiredKeys.every(
+    const strictKnown = strictKeys.every(
       (key) => snap.observed[key] !== null
     );
 
-    const allMatch =
-      allKnown &&
-      requiredKeys.every(
+    const strictMatch =
+      strictKnown &&
+      strictKeys.every(
         (key) =>
           Number(snap.observed[key]) ===
           Number(snap.desired[key])
       );
 
-    if (allMatch) {
-      console.log(
-        "RUNTIME CONFIG VERIFIED: all reported settings match."
+    if (strictMatch) {
+      const diagnostic = Object.fromEntries(
+        diagnosticKeys.map((key) => [key, snap.observed[key]])
       );
+
+      console.log(
+        "RUNTIME CONFIG VERIFIED: authoritative settings match. " +
+        JSON.stringify({ strictKeys, diagnostic })
+      );
+
       return {
         kind: "verified",
         desired: snap.desired,
         observed: snap.observed,
+        strictKeys,
+        diagnosticKeys,
       };
     }
 
@@ -1126,12 +1141,11 @@ async function verifyRuntimeConfiguration(
 
   const snap = monitor.snapshot();
 
-  const mismatches = requiredKeys
+  const mismatches = strictKeys
     .filter(
       (key) =>
         snap.observed[key] !== null &&
-        Number(snap.observed[key]) !==
-          Number(snap.desired[key])
+        Number(snap.observed[key]) !== Number(snap.desired[key])
     )
     .map((key) => ({
       key,
@@ -1139,14 +1153,18 @@ async function verifyRuntimeConfiguration(
       actual: snap.observed[key],
     }));
 
-  const unknown = requiredKeys.filter(
+  const unknown = strictKeys.filter(
     (key) => snap.observed[key] === null
+  );
+
+  const diagnostic = Object.fromEntries(
+    diagnosticKeys.map((key) => [key, snap.observed[key]])
   );
 
   if (mismatches.length) {
     console.log(
-      "RUNTIME CONFIG MISMATCH: " +
-      JSON.stringify({ mismatches, unknown })
+      "RUNTIME CONFIG MISMATCH (authoritative settings): " +
+      JSON.stringify({ mismatches, unknown, diagnostic })
     );
 
     return {
@@ -1155,30 +1173,35 @@ async function verifyRuntimeConfiguration(
       observed: snap.observed,
       mismatches,
       unknown,
+      strictKeys,
+      diagnosticKeys,
     };
   }
 
   console.log(
     "RUNTIME CONFIG PARTIALLY VERIFIED: " +
     JSON.stringify({
+      strictKeys,
       desired: snap.desired,
       observed: snap.observed,
       unknown,
+      diagnostic,
     })
   );
 
-  // X40/r2416a does not always echo every persistent setting.
-  // Absence of an echo is not treated as failure. Only an explicit
-  // conflicting value is considered a mismatch.
+  // X40/r2416a may not echo every persistent setting. Also, during
+  // CleanGenius Deep it can move through different cleaning phases, so
+  // cleanMode=0 is allowed to later become cleanMode=2 without aborting.
   return {
-    kind: unknown.length
-      ? "partial"
-      : "verified",
+    kind: unknown.length ? "partial" : "verified",
     desired: snap.desired,
     observed: snap.observed,
     unknown,
+    strictKeys,
+    diagnosticKeys,
   };
 }
+
 
 async function cancelForRuntimeMismatch(
   phase,
@@ -1255,12 +1278,13 @@ async function runPhase(phase, phaseIndex) {
   // begins. Therefore we configure first, START the single room, and
   // only then judge the device's reported runtime state.
   const monitor = createRuntimeConfigMonitor(phase);
+  let waitPromise = null;
 
   try {
     await applyPhaseConfigurationBestEffort(phase);
 
     // Arm lifecycle tracking before START_CUSTOM.
-    const waitPromise =
+    waitPromise =
       waitForPhaseResult(phase, phaseIndex);
 
     // Mark immediately before issuing the start command so fast MQTT
@@ -1313,6 +1337,8 @@ async function runPhase(phase, phaseIndex) {
     );
 
     if (verification.kind === "mismatch") {
+      waitPromise?.cancel?.("runtime-configuration-mismatch");
+
       return cancelForRuntimeMismatch(
         phase,
         phaseIndex,
@@ -1362,6 +1388,8 @@ async function runPhase(phase, phaseIndex) {
 
     return outcome;
   } finally {
+    // Avoid a dangling 75-minute timeout when this phase exits early.
+    waitPromise?.cancel?.("phase-finalized");
     monitor.close();
   }
 }
