@@ -585,6 +585,106 @@ export class PresenceState {
     return Response.json({ ok: true, waterInfo });
   }
 
+  async syncElectraPresenceSafe() {
+    try {
+      const presenceKey = this.env.ELECTRA_PRESENCE_KEY;
+      const baseUrl = String(
+        this.env.ELECTRA_PRESENCE_URL || "https://electra-rest.naor-5252.workers.dev"
+      ).replace(/\/+$/, "");
+
+      if (!presenceKey) {
+        const result = {
+          ok: false,
+          skipped: "missing_electra_presence_key",
+        };
+        console.log("Electra bridge:", JSON.stringify(result));
+        return result;
+      }
+
+      const [naor, wife] = await Promise.all([
+        this.ctx.storage.get("presence:naor"),
+        this.ctx.storage.get("presence:wife"),
+      ]);
+
+      if (
+        !["home", "away"].includes(naor?.state) ||
+        !["home", "away"].includes(wife?.state)
+      ) {
+        const result = {
+          ok: false,
+          skipped: "incomplete_presence_state",
+          naor: naor?.state || null,
+          wife: wife?.state || null,
+        };
+        console.log("Electra bridge:", JSON.stringify(result));
+        return result;
+      }
+
+      const response = await fetch(
+        `${baseUrl}/automation/presence-snapshot`,
+        {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+            "X-Presence-Key": presenceKey,
+          },
+          body: JSON.stringify({
+            naor: naor.state,
+            wife: wife.state,
+            source: "dreame-presence",
+          }),
+        }
+      );
+
+      const text = await response.text();
+      let body = null;
+
+      try {
+        body = text ? JSON.parse(text) : null;
+      } catch {
+        body = { raw: text.slice(0, 500) };
+      }
+
+      const result = response.ok
+        ? {
+            ok: true,
+            status: response.status,
+            body,
+          }
+        : {
+            ok: false,
+            status: response.status,
+            error: body?.error || `Electra HTTP ${response.status}`,
+            body,
+          };
+
+      console.log("Electra bridge:", JSON.stringify(result));
+
+      await this.ctx.storage.put("electraBridgeLast", {
+        ...result,
+        syncedAt: new Date().toISOString(),
+      });
+
+      return result;
+    } catch (err) {
+      const result = {
+        ok: false,
+        error: err?.message || String(err),
+      };
+
+      console.log("Electra bridge failed:", JSON.stringify(result));
+
+      try {
+        await this.ctx.storage.put("electraBridgeLast", {
+          ...result,
+          syncedAt: new Date().toISOString(),
+        });
+      } catch {}
+
+      return result;
+    }
+  }
+
   async updatePresence(person, state, source) {
     if (!["home", "away"].includes(state)) {
       return {
@@ -602,6 +702,10 @@ export class PresenceState {
       updatedAt: new Date().toISOString(),
       source,
     });
+
+    // Sync the newly stored Dreame presence state to Electra.
+    // Fail-safe: Electra errors never interrupt Dreame.
+    await this.syncElectraPresenceSafe();
 
     await this.appendEvent("presence", {
       person,
