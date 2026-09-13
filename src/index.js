@@ -1824,6 +1824,56 @@ export class PresenceState {
   }
 }
 
+async function triggerElectraTemperatureSample(env) {
+  try {
+    const presenceKey = env.ELECTRA_PRESENCE_KEY;
+    const baseUrl = String(
+      env.ELECTRA_PRESENCE_URL || "https://electra-rest.naor-5252.workers.dev"
+    ).replace(/\/+$/, "");
+
+    if (!presenceKey) {
+      console.log("Electra temperature sample skipped: missing key");
+      return { ok: false, skipped: "missing_electra_presence_key" };
+    }
+
+    const response = await fetch(
+      `${baseUrl}/automation/temperature-sample`,
+      {
+        method: "POST",
+        headers: {
+          "Content-Type": "application/json",
+          "X-Presence-Key": presenceKey,
+        },
+        body: "{}",
+      }
+    );
+
+    const text = await response.text();
+    let body = null;
+    try {
+      body = text ? JSON.parse(text) : null;
+    } catch {
+      body = { raw: text.slice(0, 500) };
+    }
+
+    const result = {
+      ok: response.ok,
+      status: response.status,
+      body,
+    };
+
+    console.log("Electra temperature sample:", JSON.stringify(result));
+    return result;
+  } catch (error) {
+    const result = {
+      ok: false,
+      error: error?.message || String(error),
+    };
+    console.log("Electra temperature sample failed:", JSON.stringify(result));
+    return result;
+  }
+}
+
 export default {
   async fetch(request, env) {
     const url = new URL(request.url);
@@ -1902,6 +1952,9 @@ export default {
     await stub.fetch(
       "https://internal/water-check"
     );
-  },
+  
+    // Reuse Dreame's existing 5-minute Cron for Electra sampling.
+    await triggerElectraTemperatureSample(env);
+},
 };
 
