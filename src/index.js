@@ -489,6 +489,26 @@ export class PresenceState {
       const aborted = event === "plan-aborted";
       const fallback = event === "plan-fallback";
 
+      // maxRunsPerDay is intentionally interpreted as the maximum number
+      // of full-plan ATTEMPTS in the current away/presence cycle.
+      // A successful full plan closes the cycle immediately, even if
+      // attempts remain. An aborted plan may retry automatically until
+      // the configured attempt limit is reached.
+      const maxAttempts = Math.max(
+        1,
+        Number(this.effectiveConfig().maxRunsPerDay || 1)
+      );
+      const attemptsUsed = Number(runInfo.count || 0);
+      const attemptsExhausted =
+        aborted && attemptsUsed >= maxAttempts;
+      const closePresenceCycle =
+        completed || attemptsExhausted;
+      const closeReason = completed
+        ? "plan_completed"
+        : attemptsExhausted
+          ? "max_attempts_reached"
+          : null;
+
       const updated = {
         ...runInfo,
         active:
@@ -505,18 +525,46 @@ export class PresenceState {
           aborted
             ? new Date().toISOString()
             : runInfo.abortedAt,
+        // Backward-compatible field: now means the current presence
+        // cycle is closed, not merely that an abort occurred.
         automaticRetryBlocked:
-          aborted
+          closePresenceCycle
             ? true
-            : completed
+            : aborted
               ? false
               : Boolean(runInfo.automaticRetryBlocked),
         retryBlockedAt:
-          aborted
+          closePresenceCycle
             ? new Date().toISOString()
-            : completed
+            : aborted
               ? null
               : runInfo.retryBlockedAt,
+        retryBlockReason:
+          closePresenceCycle
+            ? closeReason
+            : aborted
+              ? null
+              : runInfo.retryBlockReason || null,
+        cycleClosed:
+          closePresenceCycle
+            ? true
+            : aborted
+              ? false
+              : Boolean(runInfo.cycleClosed),
+        cycleCloseReason:
+          closePresenceCycle
+            ? closeReason
+            : aborted
+              ? null
+              : runInfo.cycleCloseReason || null,
+        planCompletedInCycle:
+          completed
+            ? true
+            : aborted
+              ? false
+              : Boolean(runInfo.planCompletedInCycle),
+        maxAttemptsForCycle: maxAttempts,
+        attemptsUsedInCycle: attemptsUsed,
         planProgress: {
           event,
           details,
@@ -721,20 +769,62 @@ export class PresenceState {
       returnHome = await this.stopIfActive(person);
     }
 
-    if (state === "home") {
+    const transitionedHome =
+      state === "home" &&
+      previousPresence?.state !== "home";
+    const transitionedAway =
+      state === "away" &&
+      previousPresence?.state !== "away";
+
+    // A real HOME transition after a run arms the next cycle, but does
+    // NOT reopen it yet. This prevents an immediate second run while the
+    // other participant is still away.
+    if (transitionedHome) {
       const latestRunInfo =
         await this.ctx.storage.get("runInfo");
 
-      if (latestRunInfo?.automaticRetryBlocked) {
+      if (latestRunInfo?.lastRunAt) {
         await this.ctx.storage.put("runInfo", {
           ...latestRunInfo,
-          automaticRetryBlocked: false,
-          retryBlockedAt: null,
-          automaticRetryResetAt: new Date().toISOString(),
-          automaticRetryResetBy: person,
+          presenceResetArmed: true,
+          presenceResetArmedAt: new Date().toISOString(),
+          presenceResetArmedBy: person,
         });
 
-        await this.appendEvent("automatic_retry_reset", {
+        await this.appendEvent("presence_cycle_reset_armed", {
+          person,
+          source,
+        });
+      }
+    }
+
+    // Only a subsequent real AWAY transition opens a fresh cycle.
+    // Attempt count is reset here, not when the previous plan finishes.
+    if (transitionedAway) {
+      const latestRunInfo =
+        await this.ctx.storage.get("runInfo");
+
+      if (latestRunInfo?.presenceResetArmed) {
+        const now = this.localNow();
+
+        await this.ctx.storage.put("runInfo", {
+          ...latestRunInfo,
+          date: now.date,
+          count: 0,
+          active: false,
+          automaticRetryBlocked: false,
+          retryBlockedAt: null,
+          retryBlockReason: null,
+          cycleClosed: false,
+          cycleCloseReason: null,
+          planCompletedInCycle: false,
+          presenceResetArmed: false,
+          presenceCycleResetAt: new Date().toISOString(),
+          presenceCycleResetBy: person,
+          cycleNumber: Number(latestRunInfo.cycleNumber || 0) + 1,
+        });
+
+        await this.appendEvent("presence_cycle_reset", {
           person,
           source,
         });
@@ -997,6 +1087,12 @@ export class PresenceState {
       fallbackUsed: false,
       automaticRetryBlocked: false,
       retryBlockedAt: null,
+      retryBlockReason: null,
+      cycleClosed: false,
+      cycleCloseReason: null,
+      planCompletedInCycle: false,
+      presenceResetArmed: false,
+      maxAttemptsForCycle: config.maxRunsPerDay,
       callbackToken,
       roomPlan,
       forced: true,
@@ -1741,12 +1837,52 @@ export class PresenceState {
       });
     }
 
-    if (runInfo.automaticRetryBlocked) {
+    if (runInfo.cycleClosed || runInfo.automaticRetryBlocked) {
       return this.saveDecision({
         ...result,
-        action: "automatic_retry_blocked_after_abort",
+        action: "awaiting_new_presence_cycle",
+        cycleCloseReason:
+          runInfo.cycleCloseReason ||
+          runInfo.retryBlockReason ||
+          "cycle_closed",
         retryBlockedAt: runInfo.retryBlockedAt || null,
+        completedAt: runInfo.completedAt || null,
         lastAbortAt: runInfo.abortedAt || null,
+        attemptsUsedInCycle: Number(runInfo.count || 0),
+        maxAttemptsInCycle: maxRuns,
+        presenceResetArmed:
+          Boolean(runInfo.presenceResetArmed),
+      });
+    }
+
+    // Defensive fallback: if a callback was missed but the attempt count
+    // already reached the configured maximum, close the cycle here.
+    if (Number(runInfo.count || 0) >= maxRuns) {
+      const closed = {
+        ...runInfo,
+        automaticRetryBlocked: true,
+        retryBlockedAt: new Date().toISOString(),
+        retryBlockReason: "max_attempts_reached",
+        cycleClosed: true,
+        cycleCloseReason: "max_attempts_reached",
+        maxAttemptsForCycle: maxRuns,
+      };
+
+      await this.ctx.storage.put("runInfo", closed);
+      await this.appendEvent("presence_cycle_closed", {
+        reason: "max_attempts_reached",
+        attemptsUsed: Number(runInfo.count || 0),
+        maxAttempts: maxRuns,
+      });
+
+      return this.saveDecision({
+        ...result,
+        action: "awaiting_new_presence_cycle",
+        cycleCloseReason: "max_attempts_reached",
+        attemptsUsedInCycle: Number(runInfo.count || 0),
+        maxAttemptsInCycle: maxRuns,
+        presenceResetArmed:
+          Boolean(runInfo.presenceResetArmed),
       });
     }
 
@@ -1761,8 +1897,7 @@ export class PresenceState {
     if (
       roomPlan.length === 0 ||
       !presenceSatisfied ||
-      !inWindow ||
-      Number(runInfo.count || 0) >= maxRuns
+      !inWindow
     ) {
       return this.saveDecision(result);
     }
@@ -1802,6 +1937,12 @@ export class PresenceState {
       fallbackUsed: false,
       automaticRetryBlocked: false,
       retryBlockedAt: null,
+      retryBlockReason: null,
+      cycleClosed: false,
+      cycleCloseReason: null,
+      planCompletedInCycle: false,
+      presenceResetArmed: false,
+      maxAttemptsForCycle: maxRuns,
       callbackToken,
       roomPlan,
       presenceMode,
