@@ -146,6 +146,61 @@ function phaseLabel(phase) {
   return `שאיבה בלבד ${suctionNames[phase.suction] || phase.suction} ×${phase.repeats}: ${names}`;
 }
 
+
+function phaseNotificationLines(phase) {
+  const room = phase.rooms?.[0];
+  const roomName = room?.name || `חדר ${room?.id ?? "?"}`;
+
+  if (phase.mode === "cleangenius") {
+    const geniusName =
+      String(phase.geniusMode) === "2"
+        ? "Deep"
+        : "Routine";
+
+    return [
+      `🏠 חדר: ${roomName}`,
+      `🧠 סוג ניקוי: CleanGenius ${geniusName}`,
+      "🧹 פעולה: שאיבה + שטיפה (Vac+Mop)",
+      "⚙️ ניקוי מותאם אישית: כבוי",
+    ];
+  }
+
+  const suctionNames = [
+    "Quiet",
+    "Standard",
+    "Intense",
+    "Max",
+  ];
+
+  const suction =
+    suctionNames[Number(phase.suction)] ??
+    String(phase.suction);
+
+  return [
+    `🏠 חדר: ${roomName}`,
+    "🧹 סוג ניקוי: שאיבה בלבד",
+    `💨 עוצמת שאיבה: ${suction}`,
+    `🔁 מספר מעברים בחדר: ${phase.repeats}`,
+    "💧 שטיפה: כבויה",
+  ];
+}
+
+function formatDurationMs(ms) {
+  const totalSeconds = Math.max(
+    0,
+    Math.round(Number(ms || 0) / 1000)
+  );
+
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+
+  if (minutes <= 0) {
+    return `${seconds} שניות`;
+  }
+
+  return `${minutes} דק׳ ${seconds} שנ׳`;
+}
+
 function isNoAck(err) {
   const code = err?.body?.code;
   const text = `${err?.name || ""} ${err?.message || ""}`;
@@ -1236,7 +1291,7 @@ async function cancelForRuntimeMismatch(
   await sendTelegram(
     [
       "⚠️ הופסק ניקוי בגלל אי־התאמה במצב הרובוט",
-      `חדר: ${room?.name || room?.id || "לא ידוע"}`,
+      ...phaseNotificationLines(phase),
       ...(outcome.mismatches || []).map(
         (x) =>
           `${x.key}: רצוי ${x.desired}, בפועל ${x.actual}`
@@ -1279,6 +1334,7 @@ async function runPhase(phase, phaseIndex) {
   // only then judge the device's reported runtime state.
   const monitor = createRuntimeConfigMonitor(phase);
   let waitPromise = null;
+  let cleaningStartedAt = null;
 
   try {
     await applyPhaseConfigurationBestEffort(phase);
@@ -1290,6 +1346,15 @@ async function runPhase(phase, phaseIndex) {
     // Mark immediately before issuing the start command so fast MQTT
     // state transitions are captured even if HTTP returns no ACK later.
     monitor.markRuntimeStart();
+    cleaningStartedAt = Date.now();
+
+    await sendTelegram(
+      [
+        `▶️ התחיל ניקוי חדר ${phaseIndex + 1}/${phases.length}`,
+        ...phaseNotificationLines(phase),
+        `🕐 שעה: ${israelTime()}`,
+      ].join("\n")
+    );
 
     if (phase.mode === "cleangenius") {
       console.log(
@@ -1368,9 +1433,17 @@ async function runPhase(phase, phaseIndex) {
 
       await sendTelegram(
         [
-          "⚠️ תוכנית החדרים הופסקה",
-          `שלב: ${label}`,
-          `סיבה: ${outcome.reason || outcome.kind}`,
+          "⚠️ ניקוי החדר הופסק",
+          `שלב: ${phaseIndex + 1}/${phases.length}`,
+          ...phaseNotificationLines(phase),
+          `❌ סיבה: ${outcome.reason || outcome.kind}`,
+          ...(cleaningStartedAt
+            ? [
+                `⏱️ זמן עד העצירה: ${formatDurationMs(
+                  Date.now() - cleaningStartedAt
+                )}`,
+              ]
+            : []),
           `🕐 שעה: ${israelTime()}`,
         ].join("\n")
       );
@@ -1385,6 +1458,21 @@ async function runPhase(phase, phaseIndex) {
       label,
       roomIds: ids,
     });
+
+    await sendTelegram(
+      [
+        `✅ הסתיים ניקוי חדר ${phaseIndex + 1}/${phases.length}`,
+        ...phaseNotificationLines(phase),
+        ...(cleaningStartedAt
+          ? [
+              `⏱️ משך ניקוי: ${formatDurationMs(
+                Date.now() - cleaningStartedAt
+              )}`,
+            ]
+          : []),
+        `🕐 שעה: ${israelTime()}`,
+      ].join("\n")
+    );
 
     return outcome;
   } finally {
