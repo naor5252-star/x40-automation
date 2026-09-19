@@ -1072,6 +1072,233 @@ function createRuntimeConfigMonitor(phase) {
   };
 }
 
+
+const mopSafetyState = {
+  autoMount: null,
+  inStation: null,
+  padInstalled: null,
+  miotState: null,
+  sawReturnRemoveMop: false,
+  removeSettledAt: null,
+  lastPropertyAt: null,
+};
+
+function updateMopSafetyFromProperties(changes) {
+  for (const change of changes || []) {
+    const siid = Number(change?.siid);
+    const piid = Number(change?.piid);
+    const value = Number(change?.value);
+
+    if (!Number.isFinite(value)) continue;
+
+    if (siid === 4 && piid === 45) {
+      mopSafetyState.autoMount = value;
+      mopSafetyState.lastPropertyAt = Date.now();
+      console.log(`MOP SAFETY AutoMountMop actual=${value}`);
+      continue;
+    }
+
+    if (siid === 4 && piid === 52) {
+      mopSafetyState.inStation = value;
+      mopSafetyState.lastPropertyAt = Date.now();
+      console.log(`MOP SAFETY MopInStation actual=${value}`);
+      continue;
+    }
+
+    if (siid === 4 && piid === 53) {
+      mopSafetyState.padInstalled = value;
+      mopSafetyState.lastPropertyAt = Date.now();
+      console.log(`MOP SAFETY MopPadInstalled actual=${value}`);
+    }
+  }
+}
+
+function updateMopSafetyFromVacuumState(state) {
+  const value = Number(state?.miotStateRaw);
+  if (!Number.isFinite(value)) return;
+
+  const previous = mopSafetyState.miotState;
+  mopSafetyState.miotState = value;
+
+  if (value === 18) {
+    mopSafetyState.sawReturnRemoveMop = true;
+    mopSafetyState.removeSettledAt = null;
+    console.log("MOP SAFETY MiotState=18 ReturnRemoveMop");
+    return;
+  }
+
+  if (
+    mopSafetyState.sawReturnRemoveMop &&
+    value !== 18 &&
+    (value === 13 || value === 6)
+  ) {
+    mopSafetyState.removeSettledAt = Date.now();
+    console.log(
+      `MOP SAFETY mop-removal sequence settled at MiotState=${value}`
+    );
+  }
+
+  if (previous !== value) {
+    console.log(
+      `MOP SAFETY MiotState ${previous ?? "unknown"} -> ${value}`
+    );
+  }
+}
+
+rawSub.on("properties", updateMopSafetyFromProperties);
+vacuum.on("change", updateMopSafetyFromVacuumState);
+
+function vacuumOnlyMopSafetySnapshot() {
+  const inStation = Number(mopSafetyState.inStation);
+  const padInstalled = Number(mopSafetyState.padInstalled);
+
+  const stationConfirmed =
+    inStation === 1 || inStation === 4;
+
+  const notInstalledConfirmed =
+    padInstalled === 0;
+
+  const removalSequenceConfirmed =
+    Boolean(mopSafetyState.removeSettledAt);
+
+  return {
+    safe:
+      stationConfirmed ||
+      notInstalledConfirmed ||
+      removalSequenceConfirmed,
+    stationConfirmed,
+    notInstalledConfirmed,
+    removalSequenceConfirmed,
+    autoMount: mopSafetyState.autoMount,
+    inStation: mopSafetyState.inStation,
+    padInstalled: mopSafetyState.padInstalled,
+    miotState: mopSafetyState.miotState,
+    sawReturnRemoveMop: mopSafetyState.sawReturnRemoveMop,
+  };
+}
+
+async function readVacuumOnlyMopSafetyOnce() {
+  try {
+    const result = await client.getProperties(
+      String(device.did),
+      [
+        { siid: 4, piid: 45 },
+        { siid: 4, piid: 52 },
+        { siid: 4, piid: 53 },
+      ],
+      { timeoutMs: 10000 }
+    );
+
+    updateMopSafetyFromProperties(
+      (result || [])
+        .filter(
+          (x) =>
+            (x?.code === undefined || Number(x.code) === 0) &&
+            x?.value !== undefined
+        )
+        .map((x) => ({
+          siid: x.siid,
+          piid: x.piid,
+          value: x.value,
+        }))
+    );
+
+    return vacuumOnlyMopSafetySnapshot();
+  } catch (err) {
+    if (isNoAck(err)) {
+      console.log(
+        "MOP SAFETY readback unavailable (no HTTP ACK); " +
+        "continuing with MQTT/state evidence."
+      );
+      return vacuumOnlyMopSafetySnapshot();
+    }
+    throw err;
+  }
+}
+
+async function waitForVacuumOnlyMopsParked(timeoutMs = 45000) {
+  let snapshot = await readVacuumOnlyMopSafetyOnce();
+
+  if (snapshot.safe) {
+    console.log(
+      "VACUUM-ONLY MOP SAFETY VERIFIED immediately: " +
+      JSON.stringify(snapshot)
+    );
+    return snapshot;
+  }
+
+  const deadline = Date.now() + timeoutMs;
+  let nextReadbackAt = Date.now() + 12000;
+
+  while (Date.now() < deadline) {
+    snapshot = vacuumOnlyMopSafetySnapshot();
+
+    if (snapshot.safe) {
+      console.log(
+        "VACUUM-ONLY MOP SAFETY VERIFIED: " +
+        JSON.stringify(snapshot)
+      );
+      return snapshot;
+    }
+
+    if (Date.now() >= nextReadbackAt) {
+      snapshot = await readVacuumOnlyMopSafetyOnce();
+
+      if (snapshot.safe) {
+        console.log(
+          "VACUUM-ONLY MOP SAFETY VERIFIED by readback: " +
+          JSON.stringify(snapshot)
+        );
+        return snapshot;
+      }
+
+      nextReadbackAt = Date.now() + 12000;
+    }
+
+    await sleep(750);
+  }
+
+  snapshot = vacuumOnlyMopSafetySnapshot();
+
+  console.log(
+    "VACUUM-ONLY MOP SAFETY NOT VERIFIED: " +
+    JSON.stringify(snapshot)
+  );
+
+  return snapshot;
+}
+
+async function ensureVacuumOnlyMopsParked() {
+  console.log(
+    "Preparing true vacuum-only mode: " +
+    "enable automatic mop removal, request Sweeping, " +
+    "then wait for physical pad-removal confirmation."
+  );
+
+  await writeProperty(4, 45, 1, "AutoMountMop=1");
+  await sleep(350);
+
+  await writeSmartHostBestEffort(0);
+
+  // 0 = Sweeping / vacuum-only. On X40 auto-mount models,
+  // the 2 -> 0 transition can trigger dock-side mop removal.
+  await setCleanMode(0);
+
+  const snapshot = await waitForVacuumOnlyMopsParked(45000);
+
+  if (!snapshot.safe) {
+    const err = new Error(
+      "Vacuum-only safety gate: mop pads were not confirmed in the station"
+    );
+    err.code = "VACUUM_ONLY_MOPS_NOT_PARKED";
+    err.details = snapshot;
+    throw err;
+  }
+
+  await sleep(1200);
+  return snapshot;
+}
+
 async function writeSmartHostBestEffort(mode) {
   const desired = Number(mode);
   const name =
@@ -1130,14 +1357,19 @@ async function applyPhaseConfigurationBestEffort(phase) {
 
   console.log(
     "Applying vacuum-only configuration before start " +
-    "(ACK is not required at this stage)."
+    "(physical mop removal must be confirmed)."
   );
 
   await setCustomizedCleaning(false);
   await sleep(250);
-  await writeSmartHostBestEffort(0);
-  await setCleanMode(0);
-  await sleep(500);
+
+  const mopSafety =
+    await ensureVacuumOnlyMopsParked();
+
+  console.log(
+    "Vacuum-only physical state ready: " +
+    JSON.stringify(mopSafety)
+  );
 }
 
 async function verifyRuntimeConfiguration(
@@ -1337,7 +1569,46 @@ async function runPhase(phase, phaseIndex) {
   let cleaningStartedAt = null;
 
   try {
-    await applyPhaseConfigurationBestEffort(phase);
+    try {
+      await applyPhaseConfigurationBestEffort(phase);
+    } catch (err) {
+      if (err?.code === "VACUUM_ONLY_MOPS_NOT_PARKED") {
+        const room = phase.rooms?.[0];
+
+        const outcome = {
+          kind: "mop-safety-unverified",
+          reason: "vacuum-only-mops-not-parked",
+          roomId: room?.id ?? null,
+          roomName: room?.name || null,
+          mopSafety: err?.details || null,
+        };
+
+        console.log(
+          "Refusing to start vacuum-only room: " +
+          JSON.stringify(outcome)
+        );
+
+        await sendRunEvent("plan-aborted", {
+          phaseIndex,
+          label,
+          outcome,
+        });
+
+        await sendTelegram(
+          [
+            "🛑 חדר שאיבה בלבד לא הופעל",
+            ...phaseNotificationLines(phase),
+            "הסיבה: רפידות המגב לא אושרו כמאוחסנות בתחנה.",
+            "העדפתי לעצור מאשר להסתכן בשטיפה לא רצויה.",
+            `🕐 שעה: ${israelTime()}`,
+          ].join("\n")
+        );
+
+        return outcome;
+      }
+
+      throw err;
+    }
 
     // Arm lifecycle tracking before START_CUSTOM.
     waitPromise =
@@ -1369,8 +1640,9 @@ async function runPhase(phase, phaseIndex) {
       );
     } else {
       console.log(
-        `Starting vacuum-only for room: ${ids.join(",")} ` +
-        `fan=${phase.suction} repeats=${phase.repeats}`
+        `Starting VERIFIED vacuum-only for room: ${ids.join(",")} ` +
+        `fan=${phase.suction} repeats=${phase.repeats} ` +
+        "water=0 mops=parked"
       );
 
       const result = await vacuum.cleanSegments(ids, {
