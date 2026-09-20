@@ -1087,7 +1087,15 @@ function updateMopSafetyFromProperties(changes) {
   for (const change of changes || []) {
     const siid = Number(change?.siid);
     const piid = Number(change?.piid);
-    const value = Number(change?.value);
+    if (
+      change?.value === null ||
+      change?.value === undefined ||
+      change?.value === ""
+    ) {
+      continue;
+    }
+
+    const value = Number(change.value);
 
     if (!Number.isFinite(value)) continue;
 
@@ -1114,7 +1122,15 @@ function updateMopSafetyFromProperties(changes) {
 }
 
 function updateMopSafetyFromVacuumState(state) {
-  const value = Number(state?.miotStateRaw);
+  if (
+    state?.miotStateRaw === null ||
+    state?.miotStateRaw === undefined ||
+    state?.miotStateRaw === ""
+  ) {
+    return;
+  }
+
+  const value = Number(state.miotStateRaw);
   if (!Number.isFinite(value)) return;
 
   const previous = mopSafetyState.miotState;
@@ -1149,13 +1165,33 @@ rawSub.on("properties", updateMopSafetyFromProperties);
 vacuum.on("change", updateMopSafetyFromVacuumState);
 
 function vacuumOnlyMopSafetySnapshot() {
-  const inStation = Number(mopSafetyState.inStation);
-  const padInstalled = Number(mopSafetyState.padInstalled);
+  const rawInStation = mopSafetyState.inStation;
+  const rawPadInstalled = mopSafetyState.padInstalled;
+
+  const inStation =
+    rawInStation === null ||
+    rawInStation === undefined ||
+    rawInStation === ""
+      ? null
+      : Number(rawInStation);
+
+  const padInstalled =
+    rawPadInstalled === null ||
+    rawPadInstalled === undefined ||
+    rawPadInstalled === ""
+      ? null
+      : Number(rawPadInstalled);
 
   const stationConfirmed =
-    inStation === 1 || inStation === 4;
+    inStation !== null &&
+    Number.isFinite(inStation) &&
+    (inStation === 1 || inStation === 4);
 
-  const notInstalledConfirmed =
+  // Diagnostic only. Do NOT use this alone as permission to start:
+  // on this X40 it can toggle while mop/CleanGenius work is active.
+  const padNotInstalledDiagnostic =
+    padInstalled !== null &&
+    Number.isFinite(padInstalled) &&
     padInstalled === 0;
 
   const removalSequenceConfirmed =
@@ -1164,16 +1200,16 @@ function vacuumOnlyMopSafetySnapshot() {
   return {
     safe:
       stationConfirmed ||
-      notInstalledConfirmed ||
       removalSequenceConfirmed,
     stationConfirmed,
-    notInstalledConfirmed,
+    padNotInstalledDiagnostic,
     removalSequenceConfirmed,
     autoMount: mopSafetyState.autoMount,
-    inStation: mopSafetyState.inStation,
-    padInstalled: mopSafetyState.padInstalled,
+    inStation,
+    padInstalled,
     miotState: mopSafetyState.miotState,
-    sawReturnRemoveMop: mopSafetyState.sawReturnRemoveMop,
+    sawReturnRemoveMop:
+      mopSafetyState.sawReturnRemoveMop,
   };
 }
 
@@ -1268,36 +1304,205 @@ async function waitForVacuumOnlyMopsParked(timeoutMs = 45000) {
   return snapshot;
 }
 
+
+async function waitForRobotSettledForModeChange(
+  timeoutMs = 120000,
+  stableMs = 5000
+) {
+  const deadline = Date.now() + timeoutMs;
+  let readySince = null;
+  let lastLogged = Symbol("unset");
+
+  console.log(
+    "VACUUM-ONLY PREP: waiting for dock/post-clean cycle to settle."
+  );
+
+  while (Date.now() < deadline) {
+    const raw = vacuum.state?.miotStateRaw;
+
+    const state =
+      raw === null ||
+      raw === undefined ||
+      raw === ""
+        ? null
+        : Number(raw);
+
+    if (state !== lastLogged) {
+      console.log(
+        `VACUUM-ONLY PREP MiotState=${state ?? "unknown"}`
+      );
+      lastLogged = state;
+    }
+
+    // Idle/docked states. Require stability so a short Charging=6
+    // pulse immediately before AutoEmpty/MopCleaning does not pass.
+    const ready =
+      state === 2 ||
+      state === 6 ||
+      state === 8 ||
+      state === 13;
+
+    if (ready) {
+      if (readySince === null) {
+        readySince = Date.now();
+      }
+
+      if (Date.now() - readySince >= stableMs) {
+        console.log(
+          `VACUUM-ONLY PREP ready: MiotState=${state} ` +
+          `stable=${Date.now() - readySince}ms`
+        );
+        return {
+          kind: "ready",
+          miotState: state,
+        };
+      }
+    } else {
+      readySince = null;
+    }
+
+    await sleep(500);
+  }
+
+  const raw = vacuum.state?.miotStateRaw;
+  const state =
+    raw === null ||
+    raw === undefined ||
+    raw === ""
+      ? null
+      : Number(raw);
+
+  return {
+    kind: "timeout",
+    miotState: Number.isFinite(state) ? state : null,
+  };
+}
+
 async function ensureVacuumOnlyMopsParked() {
+  const ready =
+    await waitForRobotSettledForModeChange(
+      120000,
+      5000
+    );
+
+  if (ready.kind !== "ready") {
+    const err = new Error(
+      "Robot did not settle after previous room/dock cycle"
+    );
+    err.code = "VACUUM_ONLY_ROBOT_NOT_READY";
+    err.details = ready;
+    throw err;
+  }
+
   console.log(
     "Preparing true vacuum-only mode: " +
-    "enable automatic mop removal, request Sweeping, " +
-    "then wait for physical pad-removal confirmation."
+    "AutoMountMop ON + SmartHost OFF + Sweeping."
   );
+
+  // Clear evidence from the previous room.
+  mopSafetyState.sawReturnRemoveMop = false;
+  mopSafetyState.removeSettledAt = null;
 
   await writeProperty(4, 45, 1, "AutoMountMop=1");
   await sleep(350);
 
   await writeSmartHostBestEffort(0);
 
-  // 0 = Sweeping / vacuum-only. On X40 auto-mount models,
-  // the 2 -> 0 transition can trigger dock-side mop removal.
+  // 0 = Sweeping / vacuum-only.
   await setCleanMode(0);
 
-  const snapshot = await waitForVacuumOnlyMopsParked(45000);
+  // Give the device time to perform an explicit remove-mop sequence
+  // if it chooses to do so. No ACK/echo is NOT treated as success.
+  const snapshot =
+    await waitForVacuumOnlyMopsParked(60000);
 
-  if (!snapshot.safe) {
-    const err = new Error(
-      "Vacuum-only safety gate: mop pads were not confirmed in the station"
+  if (snapshot.safe) {
+    console.log(
+      "VACUUM-ONLY PRE-START PHYSICAL EVIDENCE: " +
+      JSON.stringify(snapshot)
     );
-    err.code = "VACUUM_ONLY_MOPS_NOT_PARKED";
-    err.details = snapshot;
-    throw err;
+  } else {
+    console.log(
+      "VACUUM-ONLY PRE-START physical evidence unavailable; " +
+      "will require MiotState=1 after START_CUSTOM. " +
+      JSON.stringify(snapshot)
+    );
   }
 
-  await sleep(1200);
   return snapshot;
 }
+
+async function waitForVacuumOnlyActualMode(
+  timeoutMs = 45000
+) {
+  return new Promise((resolve) => {
+    let settled = false;
+    const seen = [];
+
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      vacuum.off("change", onChange);
+      resolve({
+        ...result,
+        seen,
+      });
+    };
+
+    const onChange = (state) => {
+      if (
+        state?.miotStateRaw === null ||
+        state?.miotStateRaw === undefined ||
+        state?.miotStateRaw === ""
+      ) {
+        return;
+      }
+
+      const value = Number(state.miotStateRaw);
+      if (!Number.isFinite(value)) return;
+
+      if (seen[seen.length - 1] !== value) {
+        seen.push(value);
+        console.log(
+          `VACUUM-ONLY START VERIFY MiotState=${value}`
+        );
+      }
+
+      // node-dreame verified mapping:
+      //   1  = vacuum-only cleaning
+      //   12 = vacuum+mop cleaning
+      if (value === 1) {
+        done({
+          kind: "verified",
+          miotState: value,
+        });
+        return;
+      }
+
+      if (value === 12) {
+        done({
+          kind: "wrong-mode",
+          miotState: value,
+        });
+      }
+    };
+
+    const timer = setTimeout(
+      () =>
+        done({
+          kind: "timeout",
+          miotState: vacuum.state?.miotStateRaw ?? null,
+        }),
+      timeoutMs
+    );
+
+    // Listener is attached BEFORE cleanSegments is issued so a fast
+    // 1/12 transition cannot be missed during an HTTP no-ACK wait.
+    vacuum.on("change", onChange);
+  });
+}
+
 
 async function writeSmartHostBestEffort(mode) {
   const desired = Number(mode);
@@ -1572,7 +1777,10 @@ async function runPhase(phase, phaseIndex) {
     try {
       await applyPhaseConfigurationBestEffort(phase);
     } catch (err) {
-      if (err?.code === "VACUUM_ONLY_MOPS_NOT_PARKED") {
+      if (
+        err?.code === "VACUUM_ONLY_MOPS_NOT_PARKED" ||
+        err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
+      ) {
         const room = phase.rooms?.[0];
 
         const outcome = {
@@ -1598,8 +1806,12 @@ async function runPhase(phase, phaseIndex) {
           [
             "🛑 חדר שאיבה בלבד לא הופעל",
             ...phaseNotificationLines(phase),
-            "הסיבה: רפידות המגב לא אושרו כמאוחסנות בתחנה.",
-            "העדפתי לעצור מאשר להסתכן בשטיפה לא רצויה.",
+            `הסיבה: ${
+              err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
+                ? "הרובוט עדיין היה באמצע פעולת תחנה מהחדר הקודם."
+                : "מצב רפידות המגב לא אומת."
+            }`,
+            "החדר לא הופעל.",
             `🕐 שעה: ${israelTime()}`,
           ].join("\n")
         );
@@ -1640,10 +1852,12 @@ async function runPhase(phase, phaseIndex) {
       );
     } else {
       console.log(
-        `Starting VERIFIED vacuum-only for room: ${ids.join(",")} ` +
-        `fan=${phase.suction} repeats=${phase.repeats} ` +
-        "water=0 mops=parked"
+        `Starting vacuum-only candidate for room: ${ids.join(",")} ` +
+        `fan=${phase.suction} repeats=${phase.repeats} water=0`
       );
+
+      const actualModePromise =
+        waitForVacuumOnlyActualMode(45000);
 
       const result = await vacuum.cleanSegments(ids, {
         repeats: phase.repeats,
@@ -1653,6 +1867,85 @@ async function runPhase(phase, phaseIndex) {
 
       console.log(
         `Vacuum-only cleanSegments: ${JSON.stringify(result)}`
+      );
+
+      const actualMode = await actualModePromise;
+
+      console.log(
+        "VACUUM-ONLY START RESULT: " +
+        JSON.stringify(actualMode)
+      );
+
+      if (actualMode.kind !== "verified") {
+        waitPromise?.cancel?.(
+          "vacuum-only-active-mode-not-verified"
+        );
+
+        console.log(
+          "Cancelling vacuum-only room because actual " +
+          "cleaning mode was not MiotState=1."
+        );
+
+        try {
+          await vacuum.cancelCurrentJob();
+        } catch (err) {
+          console.log(
+            `Vacuum-only cancel: ${err?.message || err}`
+          );
+        }
+
+        await sleep(1200);
+
+        try {
+          await vacuum.goHome();
+        } catch (err) {
+          console.log(
+            `Vacuum-only goHome: ${err?.message || err}`
+          );
+        }
+
+        const room = phase.rooms?.[0];
+        const outcome = {
+          kind: "vacuum-mode-unverified",
+          reason:
+            actualMode.kind === "wrong-mode"
+              ? "robot-started-vacuum-and-mop"
+              : "vacuum-only-mode-not-observed",
+          roomId: room?.id ?? null,
+          roomName: room?.name || null,
+          actualMode,
+        };
+
+        await sendRunEvent("plan-aborted", {
+          phaseIndex,
+          label,
+          outcome,
+        });
+
+        await sendTelegram(
+          [
+            "🛑 הופסק חדר שאיבה בלבד",
+            ...phaseNotificationLines(phase),
+            ...(actualMode.kind === "wrong-mode"
+              ? [
+                  "❌ הרובוט נכנס למצב שאיבה+שטיפה (MiotState 12) במקום שאיבה בלבד.",
+                ]
+              : [
+                  "❌ לא התקבל אישור שהרובוט נכנס למצב שאיבה בלבד (MiotState 1).",
+                ]),
+            `מצבים שנצפו: ${
+              (actualMode.seen || []).join(" → ") || "לא התקבל"
+            }`,
+            "הפקודה הופסקה כדי לא לסמן את החדר כנוקה בטעות.",
+            `🕐 שעה: ${israelTime()}`,
+          ].join("\n")
+        );
+
+        return outcome;
+      }
+
+      console.log(
+        "✅ VACUUM-ONLY ACTIVE MODE VERIFIED: MiotState=1"
       );
     }
 
