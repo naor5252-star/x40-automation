@@ -1306,12 +1306,13 @@ async function waitForVacuumOnlyMopsParked(timeoutMs = 45000) {
 
 
 async function waitForRobotSettledForModeChange(
-  timeoutMs = 120000,
+  timeoutMs = 900000,
   stableMs = 5000
 ) {
   const deadline = Date.now() + timeoutMs;
   let readySince = null;
   let lastLogged = Symbol("unset");
+  let lastProgressLogAt = Date.now();
 
   console.log(
     "VACUUM-ONLY PREP: waiting for dock/post-clean cycle to settle."
@@ -1361,6 +1362,15 @@ async function waitForRobotSettledForModeChange(
       readySince = null;
     }
 
+    if (Date.now() - lastProgressLogAt >= 30000) {
+      console.log(
+        "VACUUM-ONLY PREP still waiting for dock to finish " +
+        `(MiotState=${state ?? "unknown"}, ` +
+        `remaining=${Math.max(0, Math.ceil((deadline - Date.now()) / 1000))}s)`
+      );
+      lastProgressLogAt = Date.now();
+    }
+
     await sleep(500);
   }
 
@@ -1381,7 +1391,7 @@ async function waitForRobotSettledForModeChange(
 async function ensureVacuumOnlyMopsParked() {
   const ready =
     await waitForRobotSettledForModeChange(
-      120000,
+      900000,
       5000
     );
 
@@ -1433,16 +1443,26 @@ async function ensureVacuumOnlyMopsParked() {
 }
 
 async function waitForVacuumOnlyActualMode(
-  timeoutMs = 45000
+  timeoutMs = 60000,
+  stableVacuumMs = 8000
 ) {
   return new Promise((resolve) => {
     let settled = false;
+    let state1Timer = null;
     const seen = [];
+
+    const clearState1Timer = () => {
+      if (state1Timer) {
+        clearTimeout(state1Timer);
+        state1Timer = null;
+      }
+    };
 
     const done = (result) => {
       if (settled) return;
       settled = true;
-      clearTimeout(timer);
+      clearState1Timer();
+      clearTimeout(overallTimer);
       vacuum.off("change", onChange);
       resolve({
         ...result,
@@ -1469,26 +1489,53 @@ async function waitForVacuumOnlyActualMode(
         );
       }
 
-      // node-dreame verified mapping:
-      //   1  = vacuum-only cleaning
-      //   12 = vacuum+mop cleaning
-      if (value === 1) {
+      if (value === 12) {
+        clearState1Timer();
         done({
-          kind: "verified",
+          kind: "wrong-mode",
           miotState: value,
         });
         return;
       }
 
-      if (value === 12) {
-        done({
-          kind: "wrong-mode",
-          miotState: value,
-        });
+      if (value === 1) {
+        if (!state1Timer) {
+          console.log(
+            `VACUUM-ONLY START VERIFY: MiotState=1; ` +
+            `requiring ${stableVacuumMs}ms stability`
+          );
+
+          state1Timer = setTimeout(() => {
+            const raw = vacuum.state?.miotStateRaw;
+            const current =
+              raw === null ||
+              raw === undefined ||
+              raw === ""
+                ? null
+                : Number(raw);
+
+            if (current === 1) {
+              done({
+                kind: "verified",
+                miotState: 1,
+                stableMs: stableVacuumMs,
+              });
+            } else {
+              console.log(
+                "VACUUM-ONLY START VERIFY: state 1 was transient; " +
+                `current=${current ?? "unknown"}`
+              );
+              state1Timer = null;
+            }
+          }, stableVacuumMs);
+        }
+        return;
       }
+
+      clearState1Timer();
     };
 
-    const timer = setTimeout(
+    const overallTimer = setTimeout(
       () =>
         done({
           kind: "timeout",
@@ -1497,8 +1544,6 @@ async function waitForVacuumOnlyActualMode(
       timeoutMs
     );
 
-    // Listener is attached BEFORE cleanSegments is issued so a fast
-    // 1/12 transition cannot be missed during an HTTP no-ACK wait.
     vacuum.on("change", onChange);
   });
 }
@@ -1784,8 +1829,14 @@ async function runPhase(phase, phaseIndex) {
         const room = phase.rooms?.[0];
 
         const outcome = {
-          kind: "mop-safety-unverified",
-          reason: "vacuum-only-mops-not-parked",
+          kind:
+            err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
+              ? "station-not-ready"
+              : "mop-safety-unverified",
+          reason:
+            err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
+              ? "dock-post-clean-cycle-timeout"
+              : "vacuum-only-mops-not-parked",
           roomId: room?.id ?? null,
           roomName: room?.name || null,
           mopSafety: err?.details || null,
@@ -1857,7 +1908,7 @@ async function runPhase(phase, phaseIndex) {
       );
 
       const actualModePromise =
-        waitForVacuumOnlyActualMode(45000);
+        waitForVacuumOnlyActualMode(60000, 8000);
 
       const result = await vacuum.cleanSegments(ids, {
         repeats: phase.repeats,
