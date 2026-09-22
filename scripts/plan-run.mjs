@@ -983,7 +983,9 @@ function createRuntimeConfigMonitor(phase) {
       }
     : {
         customizedCleaning: 0,
-        cleanMode: 0,
+        // Proven X40/r2416a wire encoding for display Vacuum:
+        // packed 4/23 low bits = 2.
+        cleanMode: 2,
         smartHost: 0,
       };
 
@@ -1073,28 +1075,74 @@ function createRuntimeConfigMonitor(phase) {
 }
 
 
+async function tryReadPackedCleaningMode() {
+  const cached = Number(vacuum.state?.cleaningModeRaw);
+
+  if (Number.isFinite(cached)) {
+    console.log(`Packed mode from cached state: ${cached}`);
+    return cached;
+  }
+
+  try {
+    const result = await client.getProperties(
+      String(device.did),
+      [{ siid: 4, piid: 23 }],
+      { timeoutMs: 10000 }
+    );
+
+    const prop = (result || []).find(
+      (x) =>
+        Number(x?.siid) === 4 &&
+        Number(x?.piid) === 23
+    );
+
+    const value = Number(prop?.value);
+
+    if (Number.isFinite(value)) {
+      console.log(`Packed mode from direct read: ${value}`);
+      return value;
+    }
+  } catch (err) {
+    console.log(
+      `Packed mode read unavailable: ${err?.message || err}`
+    );
+  }
+
+  return null;
+}
+
+function encodeVacuumForLiftableMop(raw) {
+  const base =
+    Number.isFinite(Number(raw))
+      ? Number(raw) >>> 0
+      : 0;
+
+  return ((base & ~3) | 2) >>> 0;
+}
+
 function waitForNativeVacuumOnlyMode(
   timeoutMs = 90000,
-  stableVacuumMs = 8000,
-  state12GraceMs = 15000
+  stableMs = 8000,
+  state12GraceMs = 12000
 ) {
   return new Promise((resolve) => {
     let settled = false;
     let state1Since = null;
     let state12Since = null;
-
     const startedAt = Date.now();
 
     const observed = {
       miotState: null,
       cleanMode: null,
+      cleanModePacked: null,
       smartHost: null,
-      mopPadInstalled: null,
+      mopHandlingPulse: null,
       taskStatus: null,
+      taskStep: null,
     };
 
     const stateSequence = [];
-    const cleanModeSequence = [];
+    const packedSequence = [];
 
     const rememberState = (raw) => {
       const n = Number(raw);
@@ -1104,9 +1152,7 @@ function waitForNativeVacuumOnlyMode(
 
       if (stateSequence[stateSequence.length - 1] !== n) {
         stateSequence.push(n);
-        console.log(
-          `NATIVE VACUUM VERIFY MiotState=${n}`
-        );
+        console.log(`X40 VACUUM VERIFY MiotState=${n}`);
       }
     };
 
@@ -1117,6 +1163,26 @@ function waitForNativeVacuumOnlyMode(
         state?.miotStateRaw !== ""
       ) {
         rememberState(state.miotStateRaw);
+      }
+
+      if (
+        state?.cleaningModeRaw !== null &&
+        state?.cleaningModeRaw !== undefined &&
+        state?.cleaningModeRaw !== ""
+      ) {
+        const packed = Number(state.cleaningModeRaw);
+
+        if (Number.isFinite(packed)) {
+          observed.cleanModePacked = packed;
+          observed.cleanMode = packed & 3;
+
+          if (packedSequence[packedSequence.length - 1] !== packed) {
+            packedSequence.push(packed);
+            console.log(
+              `X40 VACUUM VERIFY CleaningModePacked=${packed} lowBits=${packed & 3}`
+            );
+          }
+        }
       }
     };
 
@@ -1142,9 +1208,16 @@ function waitForNativeVacuumOnlyMode(
           const n = Number(change.value);
           if (Number.isFinite(n)) {
             observed.taskStatus = n;
-            console.log(
-              `NATIVE VACUUM VERIFY TaskStatus=${n}`
-            );
+            console.log(`X40 VACUUM VERIFY TaskStatus=${n}`);
+          }
+          continue;
+        }
+
+        if (siid === 4 && piid === 7) {
+          const n = Number(change.value);
+          if (Number.isFinite(n)) {
+            observed.taskStep = n;
+            console.log(`X40 VACUUM VERIFY TaskStep=${n}`);
           }
           continue;
         }
@@ -1153,37 +1226,27 @@ function waitForNativeVacuumOnlyMode(
           const packed = Number(change.value);
 
           if (Number.isFinite(packed)) {
-            const mode = packed & 0x3;
-            observed.cleanMode = mode;
+            observed.cleanModePacked = packed;
+            observed.cleanMode = packed & 3;
 
-            if (
-              cleanModeSequence[
-                cleanModeSequence.length - 1
-              ] !== mode
-            ) {
-              cleanModeSequence.push(mode);
-              console.log(
-                `NATIVE VACUUM VERIFY CleanMode=${mode} packed=${packed}`
-              );
+            if (packedSequence[packedSequence.length - 1] !== packed) {
+              packedSequence.push(packed);
             }
+
+            console.log(
+              `X40 VACUUM VERIFY CleaningModePacked=${packed} lowBits=${packed & 3}`
+            );
           }
           continue;
         }
 
         if (siid === 4 && piid === 50) {
           const value =
-            parseSmartHostFromFeatureValue(
-              change.value
-            );
+            parseSmartHostFromFeatureValue(change.value);
 
-          if (
-            value !== null &&
-            Number.isFinite(value)
-          ) {
+          if (value !== null && Number.isFinite(value)) {
             observed.smartHost = value;
-            console.log(
-              `NATIVE VACUUM VERIFY SmartHost=${value}`
-            );
+            console.log(`X40 VACUUM VERIFY SmartHost=${value}`);
           }
           continue;
         }
@@ -1192,10 +1255,8 @@ function waitForNativeVacuumOnlyMode(
           const n = Number(change.value);
 
           if (Number.isFinite(n)) {
-            observed.mopPadInstalled = n;
-            console.log(
-              `NATIVE VACUUM VERIFY MopPadInstalled=${n}`
-            );
+            observed.mopHandlingPulse = n;
+            console.log(`X40 VACUUM VERIFY MopHandlingPulse=${n}`);
           }
         }
       }
@@ -1203,17 +1264,11 @@ function waitForNativeVacuumOnlyMode(
 
     const cleanup = () => {
       clearInterval(timer);
-      vacuum.off(
-        "change",
-        onVacuumChange
-      );
-      rawSub.off(
-        "properties",
-        onProperties
-      );
+      vacuum.off("change", onVacuumChange);
+      rawSub.off("properties", onProperties);
     };
 
-    const done = (result) => {
+    const finish = (result) => {
       if (settled) return;
       settled = true;
       cleanup();
@@ -1222,10 +1277,8 @@ function waitForNativeVacuumOnlyMode(
         ...result,
         observed: {
           ...observed,
-          stateSequence:
-            [...stateSequence],
-          cleanModeSequence:
-            [...cleanModeSequence],
+          stateSequence: [...stateSequence],
+          packedSequence: [...packedSequence],
         },
       });
     };
@@ -1233,63 +1286,30 @@ function waitForNativeVacuumOnlyMode(
     const timer = setInterval(() => {
       if (settled) return;
 
-      const state =
-        observed.miotState;
+      const state = observed.miotState;
 
-      // These are strong signs that the device did NOT enter the
-      // native vacuum-only path that we captured and replay-tested.
-      if (observed.cleanMode === 2) {
-        done({
+      if (state === 9 || state === 17 || state === 20) {
+        finish({
           kind: "wrong-mode",
-          reason:
-            "clean-mode-switched-to-sweep-and-mop",
+          reason: `mop-related-state-${state}`,
         });
         return;
       }
 
-      if (
-        observed.mopPadInstalled === 1
-      ) {
-        done({
-          kind: "wrong-mode",
-          reason:
-            "mop-pad-installed",
-        });
-        return;
-      }
-
-      if (state === 17) {
-        done({
-          kind: "wrong-mode",
-          reason:
-            "robot-requested-mop-install",
-        });
-        return;
-      }
-
-      // A very short state=12 transition is tolerated because the
-      // device can have internal transition states. If it persists,
-      // this is not the proven native vacuum-only path.
       if (state === 12) {
         state1Since = null;
 
         if (state12Since === null) {
           state12Since = Date.now();
-
           console.log(
-            "NATIVE VACUUM VERIFY MiotState=12; " +
-            `allowing ${state12GraceMs}ms transition grace.`
+            `X40 VACUUM VERIFY MiotState=12; allowing ${state12GraceMs}ms transition grace.`
           );
         }
 
-        if (
-          Date.now() - state12Since >=
-          state12GraceMs
-        ) {
-          done({
+        if (Date.now() - state12Since >= state12GraceMs) {
+          finish({
             kind: "wrong-mode",
-            reason:
-              "persistent-vacuum-and-mop-state",
+            reason: "persistent-state-12",
           });
         }
 
@@ -1298,28 +1318,19 @@ function waitForNativeVacuumOnlyMode(
 
       state12Since = null;
 
-      // This is the exact state observed in the native Dreamehome
-      // vacuum-only capture and verified successfully by v20 replay.
       if (state === 1) {
         if (state1Since === null) {
           state1Since = Date.now();
-
           console.log(
-            "NATIVE VACUUM VERIFY MiotState=1; " +
-            `requiring ${stableVacuumMs}ms stability.`
+            `X40 VACUUM VERIFY MiotState=1; requiring ${stableMs}ms stability.`
           );
         }
 
-        if (
-          Date.now() - state1Since >=
-          stableVacuumMs
-        ) {
-          done({
+        if (Date.now() - state1Since >= stableMs) {
+          finish({
             kind: "verified",
-            reason:
-              "stable-native-vacuum-state",
-            stableMs:
-              stableVacuumMs,
+            reason: "stable-native-vacuum-state",
+            stableMs,
           });
         }
 
@@ -1328,26 +1339,16 @@ function waitForNativeVacuumOnlyMode(
 
       state1Since = null;
 
-      if (
-        Date.now() - startedAt >=
-        timeoutMs
-      ) {
-        done({
+      if (Date.now() - startedAt >= timeoutMs) {
+        finish({
           kind: "timeout",
-          reason:
-            "native-vacuum-state-not-observed",
+          reason: "native-vacuum-state-not-observed",
         });
       }
     }, 250);
 
-    rawSub.on(
-      "properties",
-      onProperties
-    );
-    vacuum.on(
-      "change",
-      onVacuumChange
-    );
+    rawSub.on("properties", onProperties);
+    vacuum.on("change", onVacuumChange);
   });
 }
 
@@ -1409,25 +1410,60 @@ async function applyPhaseConfigurationBestEffort(phase) {
   }
 
   console.log(
-    "Applying PROVEN native-profile vacuum-only configuration: " +
-    "CustomizedCleaning=0 + SmartHost=0 + CleanMode=0; " +
-    "NO AutoMountMop write."
+    "Applying EXACT X40 vacuum-only sequence verified by v24."
+  );
+
+  const currentPacked =
+    await tryReadPackedCleaningMode();
+
+  const vacuumPacked =
+    encodeVacuumForLiftableMop(currentPacked);
+
+  console.log(
+    `X40 PRODUCTION PACKED MODE current=${currentPacked ?? "unknown"} ` +
+    `-> vacuumRaw=${vacuumPacked} lowBits=${vacuumPacked & 3}`
   );
 
   await setCustomizedCleaning(false);
-  await sleep(250);
+  await sleep(150);
 
   await writeSmartHostBestEffort(0);
-  await sleep(250);
+  await sleep(150);
 
-  // 0 = Sweeping / vacuum-only.
-  // This is the same configuration path that passed the v20 replay.
-  await setCleanMode(0);
+  await writeProperty(
+    4,
+    4,
+    Number(phase.suction),
+    `Suction=${phase.suction}`
+  );
+  await sleep(150);
 
-  // Native replay succeeded without touching AutoMountMop and without
-  // a pre-start mop-parking/dock-state gate. Runtime state is the
-  // authoritative safety check after START_CUSTOM.
-  await sleep(800);
+  await writeProperty(
+    28,
+    1,
+    16,
+    "Wetness=16"
+  );
+  await sleep(150);
+
+  await writeProperty(
+    4,
+    23,
+    vacuumPacked,
+    `CleaningModePacked=${vacuumPacked} (display Vacuum)`
+  );
+  await sleep(150);
+
+  await writeProperty(
+    4,
+    50,
+    JSON.stringify({
+      k: "CleanRoute",
+      v: 1,
+    }),
+    "CleanRoute=1"
+  );
+  await sleep(150);
 }
 
 async function verifyRuntimeConfiguration(
@@ -1716,28 +1752,70 @@ async function runPhase(phase, phaseIndex) {
       );
     } else {
       console.log(
-        `Starting PROVEN native-profile vacuum-only for room: ${ids.join(",")} ` +
-        `fan=${phase.suction} repeats=${phase.repeats} ` +
-        "NO AutoMountMop write; water=current/default"
+        `Starting EXACT X40 vacuum-only for room: ${ids.join(",")} ` +
+        `fan=${phase.suction} repeats=${phase.repeats}`
       );
 
-      // Arm the exact verifier that passed the v20 manual replay
-      // before START_CUSTOM so a fast MiotState=1 push cannot be missed.
+      const payload =
+        JSON.stringify({
+          selects:
+            ids.map(
+              (id) => [
+                id,
+                Number(phase.repeats),
+                Number(phase.suction),
+                0,
+                1,
+              ]
+            ),
+        });
+
+      console.log(
+        `RAW START_CUSTOM payload=${payload}`
+      );
+
       const actualModePromise =
         waitForNativeVacuumOnlyMode(
           90000,
           8000,
-          15000
+          12000
         );
 
-      const result = await vacuum.cleanSegments(ids, {
-        repeats: phase.repeats,
-        fan: phase.suction,
-      });
+      try {
+        const result =
+          await client.callAction(
+            String(device.did),
+            {
+              siid: 4,
+              aiid: 1,
+              in: [
+                {
+                  piid: 1,
+                  value: 18,
+                },
+                {
+                  piid: 10,
+                  value: payload,
+                },
+              ],
+            },
+            {
+              timeoutMs: 20000,
+            }
+          );
 
-      console.log(
-        `Vacuum-only cleanSegments: ${JSON.stringify(result)}`
-      );
+        console.log(
+          `RAW START_CUSTOM ACK: ${JSON.stringify(result)}`
+        );
+      } catch (err) {
+        if (isNoAck(err)) {
+          console.log(
+            "RAW START_CUSTOM: no HTTP ACK; waiting for MQTT state."
+          );
+        } else {
+          throw err;
+        }
+      }
 
       const actualMode = await actualModePromise;
 
@@ -1814,7 +1892,11 @@ async function runPhase(phase, phaseIndex) {
                   "❌ לא התקבל אישור יציב שהרובוט נכנס למצב שאיבה בלבד (MiotState 1).",
                 ]),
             `מצבים שנצפו: ${
-              (actualMode.seen || []).join(" → ") || "לא התקבל"
+              (
+                actualMode.observed?.stateSequence ||
+                []
+              ).join(" → ") ||
+              "לא התקבל"
             }`,
             "הפקודה הופסקה כדי לא לסמן את החדר כנוקה בטעות.",
             `🕐 שעה: ${israelTime()}`,
@@ -1825,7 +1907,7 @@ async function runPhase(phase, phaseIndex) {
       }
 
       console.log(
-        "✅ VACUUM-ONLY ACTIVE MODE VERIFIED: MiotState=1"
+        "✅ X40 EXACT VACUUM MODE VERIFIED: MiotState=1 stable."
       );
     }
 
