@@ -1026,12 +1026,85 @@ export const dashboardHtml = String.raw`<!doctype html>
       )
     ) return;
 
-    await doAction(
-      "/api/native-replay/start",
-      "מפעיל חיקוי של ההקלטה"
-    );
+    const btn = $("nativeReplayBtn");
+    const box = $("nativeReplayBox");
+    const pill = $("nativeReplayPill");
+    const status = $("nativeReplayStatus");
 
-    await refresh();
+    if (btn) {
+      btn.disabled = true;
+      btn.textContent = "⏳ שולח ל־GitHub…";
+    }
+
+    if (box) box.classList.remove("hidden");
+    if (pill) pill.textContent = "🟡 שולח הפעלה";
+    if (status) {
+      status.textContent =
+        "שולח עכשיו GitHub Action להפעלת חדר שינה ראשי 2…";
+    }
+
+    try {
+      const result =
+        await api(
+          "/api/native-replay/start",
+          { method: "POST" }
+        );
+
+      if (
+        result?.action !==
+        "replay_dispatched"
+      ) {
+        throw new Error(
+          result?.error ||
+          result?.action ||
+          "הפעלת החיקוי לא נשלחה"
+        );
+      }
+
+      toast(
+        "בדיקת החיקוי נשלחה ל־GitHub",
+        "ok"
+      );
+
+      if (pill) {
+        pill.textContent =
+          "🟡 GitHub Action נשלח";
+      }
+
+      if (status) {
+        status.textContent =
+          "ממתין ל־runner שיתחבר ל־Dreame…";
+      }
+
+      await refresh();
+    } catch (err) {
+      if (pill) {
+        pill.textContent =
+          "❌ החיקוי לא הופעל";
+      }
+
+      if (status) {
+        status.textContent =
+          err.message ||
+          "שגיאה בהפעלת החיקוי";
+      }
+
+      toast(
+        err.message ||
+        "שגיאה בהפעלת החיקוי",
+        "bad"
+      );
+
+      $("lastAction").textContent =
+        err.message ||
+        "שגיאה בהפעלת החיקוי";
+    } finally {
+      if (btn) {
+        btn.disabled = false;
+        btn.textContent =
+          "▶️ חקה את ההפעלה";
+      }
+    }
   }
 
   async function toggleNativeCapture() {

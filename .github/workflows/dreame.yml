@@ -17,6 +17,7 @@ on:
           - capture
           - capture-cleangenius
           - capture-native-vacuum
+          - replay-native-vacuum
           - map-rooms
           - list
           - run-id

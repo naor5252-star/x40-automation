@@ -346,8 +346,23 @@ export class PresenceState {
       url.pathname === "/api/native-replay/start" &&
       request.method === "POST"
     ) {
+      const replayResult =
+        await this.startNativeVacuumReplay();
+
+      const action =
+        String(replayResult?.action || "");
+
+      const status =
+        action === "replay_dispatch_failed"
+          ? 502
+          : action.startsWith("replay_blocked_") ||
+              action === "replay_already_active"
+            ? 409
+            : 200;
+
       return Response.json(
-        await this.startNativeVacuumReplay()
+        replayResult,
+        { status }
       );
     }
 
@@ -1071,7 +1086,7 @@ export class PresenceState {
   }
 
   async startNativeVacuumReplay() {
-    const [
+    let [
       runInfo,
       capture,
       replay,
@@ -1082,11 +1097,63 @@ export class PresenceState {
     ]);
 
     if (runInfo?.active) {
-      return {
-        action: "replay_blocked_run_active",
-        error:
-          "יש ניקוי אוטומטי פעיל. לא מתחילים בדיקת חיקוי במקביל.",
-      };
+      const maxActiveMinutes =
+        Number(
+          this.effectiveConfig()
+            .activeRunMaxMinutes || 180
+        );
+
+      const lastRunMs =
+        Date.parse(
+          runInfo.lastRunAt ||
+          runInfo.actualRunAt ||
+          ""
+        );
+
+      const ageMinutes =
+        Number.isFinite(lastRunMs)
+          ? (Date.now() - lastRunMs) / 60000
+          : Number.POSITIVE_INFINITY;
+
+      if (ageMinutes > maxActiveMinutes) {
+        runInfo = {
+          ...runInfo,
+          active: false,
+          activeExpiredAt:
+            new Date().toISOString(),
+          activeExpiredReason:
+            "native_replay_start",
+        };
+
+        await this.ctx.storage.put(
+          "runInfo",
+          runInfo
+        );
+
+        await this.appendEvent(
+          "stale_active_run_cleared_for_replay",
+          {
+            ageMinutes:
+              Number.isFinite(ageMinutes)
+                ? Math.round(ageMinutes)
+                : null,
+            maxActiveMinutes,
+          }
+        );
+      } else {
+        return {
+          action: "replay_blocked_run_active",
+          error:
+            "יש ניקוי אוטומטי פעיל כרגע. עצור/סיים אותו לפני בדיקת החיקוי.",
+          details: {
+            ageMinutes:
+              Number.isFinite(ageMinutes)
+                ? Math.round(ageMinutes)
+                : null,
+            maxActiveMinutes,
+          },
+        };
+      }
     }
 
     if (capture?.active) {
@@ -1164,9 +1231,20 @@ export class PresenceState {
         failed
       );
 
+      await this.appendEvent(
+        "native_replay_dispatch_failed",
+        {
+          sessionId,
+          error:
+            failed.error,
+        }
+      );
+
       return {
         action:
           "replay_dispatch_failed",
+        error:
+          failed.error,
         replay: {
           ...failed,
           callbackToken:
