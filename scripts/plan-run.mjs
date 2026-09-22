@@ -1443,13 +1443,20 @@ async function ensureVacuumOnlyMopsParked() {
 }
 
 async function waitForVacuumOnlyActualMode(
-  timeoutMs = 60000,
-  stableVacuumMs = 8000
+  timeoutMs = 120000,
+  stableVacuumMs = 8000,
+  state12GraceMs = 25000
 ) {
   return new Promise((resolve) => {
     let settled = false;
     let state1Timer = null;
+    let state12Timer = null;
+    let lastMiotState = null;
+    let lastCleanMode = null;
+    let sawRemoveMop = false;
+
     const seen = [];
+    const cleanModes = [];
 
     const clearState1Timer = () => {
       if (state1Timer) {
@@ -1458,16 +1465,107 @@ async function waitForVacuumOnlyActualMode(
       }
     };
 
+    const clearState12Timer = () => {
+      if (state12Timer) {
+        clearTimeout(state12Timer);
+        state12Timer = null;
+      }
+    };
+
+    const cleanup = () => {
+      clearState1Timer();
+      clearState12Timer();
+      clearTimeout(overallTimer);
+      vacuum.off("change", onChange);
+      rawSub.off("properties", onProperties);
+    };
+
     const done = (result) => {
       if (settled) return;
       settled = true;
-      clearState1Timer();
-      clearTimeout(overallTimer);
-      vacuum.off("change", onChange);
+      cleanup();
+
       resolve({
         ...result,
         seen,
+        cleanModes,
+        sawRemoveMop,
+        lastMiotState,
+        lastCleanMode,
       });
+    };
+
+    const maybeStartState12Grace = () => {
+      if (
+        lastMiotState !== 12 ||
+        sawRemoveMop ||
+        state12Timer ||
+        settled
+      ) {
+        return;
+      }
+
+      console.log(
+        "VACUUM-ONLY START VERIFY: MiotState=12 observed; " +
+        `allowing ${state12GraceMs}ms for automatic mop-removal transition.`
+      );
+
+      state12Timer = setTimeout(() => {
+        state12Timer = null;
+
+        if (
+          !settled &&
+          lastMiotState === 12 &&
+          !sawRemoveMop
+        ) {
+          done({
+            kind: "wrong-mode",
+            reason: "persistent-vacuum-and-mop-state",
+            miotState: 12,
+          });
+        }
+      }, state12GraceMs);
+    };
+
+    const onProperties = (changes) => {
+      for (const change of changes || []) {
+        const siid = Number(change?.siid);
+        const piid = Number(change?.piid);
+
+        if (siid !== 4 || piid !== 23) {
+          continue;
+        }
+
+        if (
+          change?.value === null ||
+          change?.value === undefined ||
+          change?.value === ""
+        ) {
+          continue;
+        }
+
+        const packed = Number(change.value);
+        if (!Number.isFinite(packed)) continue;
+
+        const mode = packed & 0x3;
+        lastCleanMode = mode;
+
+        if (cleanModes[cleanModes.length - 1] !== mode) {
+          cleanModes.push(mode);
+          console.log(
+            `VACUUM-ONLY START VERIFY cleanMode=${mode} packed=${packed}`
+          );
+        }
+
+        if (mode === 2) {
+          done({
+            kind: "wrong-mode",
+            reason: "clean-mode-switched-to-sweep-and-mop",
+            miotState: lastMiotState,
+            cleanMode: mode,
+          });
+        }
+      }
     };
 
     const onChange = (state) => {
@@ -1482,6 +1580,8 @@ async function waitForVacuumOnlyActualMode(
       const value = Number(state.miotStateRaw);
       if (!Number.isFinite(value)) return;
 
+      lastMiotState = value;
+
       if (seen[seen.length - 1] !== value) {
         seen.push(value);
         console.log(
@@ -1489,16 +1589,30 @@ async function waitForVacuumOnlyActualMode(
         );
       }
 
-      if (value === 12) {
-        clearState1Timer();
+      if (value === 17) {
         done({
           kind: "wrong-mode",
+          reason: "robot-requested-mop-install",
           miotState: value,
         });
         return;
       }
 
+      if (value === 18) {
+        sawRemoveMop = true;
+        clearState12Timer();
+        clearState1Timer();
+
+        console.log(
+          "VACUUM-ONLY START VERIFY: ReturnRemoveMop observed; " +
+          "waiting for stable MiotState=1."
+        );
+        return;
+      }
+
       if (value === 1) {
+        clearState12Timer();
+
         if (!state1Timer) {
           console.log(
             `VACUUM-ONLY START VERIFY: MiotState=1; ` +
@@ -1529,21 +1643,31 @@ async function waitForVacuumOnlyActualMode(
             }
           }, stableVacuumMs);
         }
+
         return;
       }
 
       clearState1Timer();
+
+      if (value === 12) {
+        maybeStartState12Grace();
+        return;
+      }
+
+      clearState12Timer();
     };
 
     const overallTimer = setTimeout(
       () =>
         done({
           kind: "timeout",
+          reason: "vacuum-only-runtime-not-confirmed",
           miotState: vacuum.state?.miotStateRaw ?? null,
         }),
       timeoutMs
     );
 
+    rawSub.on("properties", onProperties);
     vacuum.on("change", onChange);
   });
 }
@@ -1904,16 +2028,20 @@ async function runPhase(phase, phaseIndex) {
     } else {
       console.log(
         `Starting vacuum-only candidate for room: ${ids.join(",")} ` +
-        `fan=${phase.suction} repeats=${phase.repeats} water=0`
+        `fan=${phase.suction} repeats=${phase.repeats} ` +
+        "water=valid-current/default (NOT 0)"
       );
 
       const actualModePromise =
-        waitForVacuumOnlyActualMode(60000, 8000);
+        waitForVacuumOnlyActualMode(
+          120000,
+          8000,
+          25000
+        );
 
       const result = await vacuum.cleanSegments(ids, {
         repeats: phase.repeats,
         fan: phase.suction,
-        water: 0,
       });
 
       console.log(
@@ -1979,10 +2107,20 @@ async function runPhase(phase, phaseIndex) {
             ...phaseNotificationLines(phase),
             ...(actualMode.kind === "wrong-mode"
               ? [
-                  "❌ הרובוט נכנס למצב שאיבה+שטיפה (MiotState 12) במקום שאיבה בלבד.",
+                  `❌ מצב שאיבה בלבד נדחה: ${
+                    actualMode.reason || "מצב ניקוי לא תואם"
+                  }.`,
+                  `MiotState אחרון: ${
+                    actualMode.lastMiotState ??
+                    actualMode.miotState ??
+                    "לא ידוע"
+                  }`,
+                  `CleanMode אחרון: ${
+                    actualMode.lastCleanMode ?? "לא התקבל"
+                  }`,
                 ]
               : [
-                  "❌ לא התקבל אישור שהרובוט נכנס למצב שאיבה בלבד (MiotState 1).",
+                  "❌ לא התקבל אישור יציב שהרובוט נכנס למצב שאיבה בלבד (MiotState 1).",
                 ]),
             `מצבים שנצפו: ${
               (actualMode.seen || []).join(" → ") || "לא התקבל"
