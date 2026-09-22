@@ -1305,86 +1305,143 @@ async function waitForVacuumOnlyMopsParked(timeoutMs = 45000) {
 }
 
 
+function numericMiotState(value) {
+  if (value === null || value === undefined || value === "") return null;
+  const n = Number(value);
+  return Number.isFinite(n) ? n : null;
+}
+
+async function seedMiotStateForVacuumPrep(reason = "initial") {
+  const cached = numericMiotState(vacuum.state?.miotStateRaw);
+  if (cached !== null) return { state: cached, via: "cache" };
+
+  try {
+    const cloud = await vacuum.refreshFromCloud();
+    const state = numericMiotState(
+      cloud?.state?.miotStateRaw ?? vacuum.state?.miotStateRaw
+    );
+    console.log(
+      `VACUUM-ONLY PREP state seed (${reason}) cloud: ` +
+      `kind=${cloud?.kind || "unknown"} MiotState=${state ?? "unknown"}`
+    );
+    if (state !== null) return { state, via: "cloud-device-list" };
+  } catch (err) {
+    console.log(`VACUUM-ONLY PREP cloud state seed unavailable: ${err?.message || err}`);
+  }
+
+  try {
+    const refreshed = await vacuum.refresh({ timeoutMs: 10000 });
+    const state = numericMiotState(
+      refreshed?.state?.miotStateRaw ?? vacuum.state?.miotStateRaw
+    );
+    console.log(
+      `VACUUM-ONLY PREP state seed (${reason}) refresh: ` +
+      `kind=${refreshed?.kind || "unknown"} MiotState=${state ?? "unknown"}`
+    );
+    if (state !== null) return { state, via: "miot-refresh" };
+  } catch (err) {
+    console.log(`VACUUM-ONLY PREP property refresh unavailable: ${err?.message || err}`);
+  }
+
+  try {
+    const result = await client.getProperties(
+      String(device.did), [{ siid: 2, piid: 1 }], { timeoutMs: 10000 }
+    );
+    const item = Array.isArray(result)
+      ? result.find(x =>
+          Number(x?.siid) === 2 &&
+          Number(x?.piid) === 1 &&
+          (x?.code === undefined || Number(x.code) === 0))
+      : null;
+    const state = numericMiotState(item?.value);
+    console.log(
+      `VACUUM-ONLY PREP state seed (${reason}) direct 2/1: ` +
+      `MiotState=${state ?? "unknown"}`
+    );
+    if (state !== null) return { state, via: "direct-readback" };
+  } catch (err) {
+    console.log(`VACUUM-ONLY PREP direct state read unavailable: ${err?.message || err}`);
+  }
+
+  return { state: null, via: "unavailable" };
+}
+
 async function waitForRobotSettledForModeChange(
   timeoutMs = 900000,
   stableMs = 5000
 ) {
   const deadline = Date.now() + timeoutMs;
+  const unknownDeadline = Date.now() + Math.min(timeoutMs, 90000);
   let readySince = null;
   let lastLogged = Symbol("unset");
   let lastProgressLogAt = Date.now();
+  let nextStateSeedAt = 0;
+  let localState = null;
+  let localStateVia = "none";
 
-  console.log(
-    "VACUUM-ONLY PREP: waiting for dock/post-clean cycle to settle."
-  );
+  console.log("VACUUM-ONLY PREP: waiting for dock/post-clean cycle to settle.");
 
   while (Date.now() < deadline) {
-    const raw = vacuum.state?.miotStateRaw;
+    const cached = numericMiotState(vacuum.state?.miotStateRaw);
+    if (cached !== null) {
+      localState = cached;
+      localStateVia = "mqtt/cache";
+    } else if (localState === null && Date.now() >= nextStateSeedAt) {
+      const seeded = await seedMiotStateForVacuumPrep(
+        nextStateSeedAt === 0 ? "initial" : "retry"
+      );
+      if (seeded.state !== null) {
+        localState = seeded.state;
+        localStateVia = seeded.via;
+      }
+      nextStateSeedAt = Date.now() + 15000;
+    }
 
-    const state =
-      raw === null ||
-      raw === undefined ||
-      raw === ""
-        ? null
-        : Number(raw);
+    const state = numericMiotState(vacuum.state?.miotStateRaw) ?? localState;
 
     if (state !== lastLogged) {
       console.log(
-        `VACUUM-ONLY PREP MiotState=${state ?? "unknown"}`
+        `VACUUM-ONLY PREP MiotState=${state ?? "unknown"} ` +
+        `via=${state === null ? "none" : localStateVia}`
       );
       lastLogged = state;
     }
 
-    // Idle/docked states. Require stability so a short Charging=6
-    // pulse immediately before AutoEmpty/MopCleaning does not pass.
-    const ready =
-      state === 2 ||
-      state === 6 ||
-      state === 8 ||
-      state === 13;
-
+    const ready = state === 2 || state === 6 || state === 8 || state === 13;
     if (ready) {
-      if (readySince === null) {
-        readySince = Date.now();
-      }
-
+      if (readySince === null) readySince = Date.now();
       if (Date.now() - readySince >= stableMs) {
         console.log(
           `VACUUM-ONLY PREP ready: MiotState=${state} ` +
-          `stable=${Date.now() - readySince}ms`
+          `stable=${Date.now()-readySince}ms via=${localStateVia}`
         );
-        return {
-          kind: "ready",
-          miotState: state,
-        };
+        return { kind: "ready", miotState: state, via: localStateVia };
       }
     } else {
       readySince = null;
+    }
+
+    if (state === null && Date.now() >= unknownDeadline) {
+      return { kind: "state-unavailable", miotState: null, via: "none" };
     }
 
     if (Date.now() - lastProgressLogAt >= 30000) {
       console.log(
         "VACUUM-ONLY PREP still waiting for dock to finish " +
         `(MiotState=${state ?? "unknown"}, ` +
-        `remaining=${Math.max(0, Math.ceil((deadline - Date.now()) / 1000))}s)`
+        `via=${state === null ? "none" : localStateVia}, ` +
+        `remaining=${Math.max(0,Math.ceil((deadline-Date.now())/1000))}s)`
       );
       lastProgressLogAt = Date.now();
     }
-
     await sleep(500);
   }
 
-  const raw = vacuum.state?.miotStateRaw;
-  const state =
-    raw === null ||
-    raw === undefined ||
-    raw === ""
-      ? null
-      : Number(raw);
-
+  const state = numericMiotState(vacuum.state?.miotStateRaw) ?? localState;
   return {
     kind: "timeout",
-    miotState: Number.isFinite(state) ? state : null,
+    miotState: state,
+    via: state === null ? "none" : localStateVia,
   };
 }
 
@@ -1397,9 +1454,14 @@ async function ensureVacuumOnlyMopsParked() {
 
   if (ready.kind !== "ready") {
     const err = new Error(
-      "Robot did not settle after previous room/dock cycle"
+      ready.kind === "state-unavailable"
+        ? "Robot state unavailable before vacuum-only room"
+        : "Robot did not settle after previous room/dock cycle"
     );
-    err.code = "VACUUM_ONLY_ROBOT_NOT_READY";
+    err.code =
+      ready.kind === "state-unavailable"
+        ? "VACUUM_ONLY_STATE_UNAVAILABLE"
+        : "VACUUM_ONLY_ROBOT_NOT_READY";
     err.details = ready;
     throw err;
   }
@@ -1954,13 +2016,17 @@ async function runPhase(phase, phaseIndex) {
 
         const outcome = {
           kind:
-            err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
-              ? "station-not-ready"
-              : "mop-safety-unverified",
+            err?.code === "VACUUM_ONLY_STATE_UNAVAILABLE"
+              ? "robot-state-unavailable"
+              : err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
+                ? "station-not-ready"
+                : "mop-safety-unverified",
           reason:
-            err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
-              ? "dock-post-clean-cycle-timeout"
-              : "vacuum-only-mops-not-parked",
+            err?.code === "VACUUM_ONLY_STATE_UNAVAILABLE"
+              ? "miot-state-unavailable"
+              : err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
+                ? "dock-post-clean-cycle-timeout"
+                : "vacuum-only-mops-not-parked",
           roomId: room?.id ?? null,
           roomName: room?.name || null,
           mopSafety: err?.details || null,
