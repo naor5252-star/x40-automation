@@ -293,7 +293,7 @@ export const dashboardHtml = String.raw`<!doctype html>
         <button id="copyNativeCaptureBtn" class="btn ghost hidden"
           onclick="copyNativeCaptureResult()">📋 העתק תוצאה</button>
         <button id="nativeReplayBtn" class="btn good hidden"
-          onclick="startNativeReplay()">▶️ חקה את ההפעלה</button>
+          onclick="startNativeReplay()">▶️ בדוק פרופיל חדר Dreame</button>
       </div>
 
       <div id="nativeReplayBox" class="hidden" style="margin-top:10px">
@@ -985,7 +985,7 @@ export const dashboardHtml = String.raw`<!doctype html>
           : "🟠 בודק מצב בפועל";
 
       status.textContent =
-        "בדיקת החיקוי מפעילה עכשיו את חדר שינה ראשי 2 בפועל ומוודאת MiotState=1.";
+        "הבדיקה מפעילה את חדר שינה ראשי 2 דרך פרופיל החדר השמור ב־Dreame ומוודאת MiotState=1.";
       return;
     }
 
@@ -1022,7 +1022,7 @@ export const dashboardHtml = String.raw`<!doctype html>
   async function startNativeReplay() {
     if (
       !confirm(
-        "הבדיקה תפעיל עכשיו ניקוי אמיתי של חדר שינה ראשי 2 בשאיבה בלבד. אם הרובוט ייכנס למצב שטיפה, הבדיקה תבטל אותו אוטומטית. להמשיך?"
+        "הבדיקה תפעיל עכשיו את חדר שינה ראשי 2 באמצעות פרופיל החדר השמור ב־Dreame (Customized Cleaning). אם הרובוט יתקין מגבים או יעבור לשטיפה, הבדיקה תבטל אותו אוטומטית. להמשיך?"
       )
     ) return;
 
@@ -1102,7 +1102,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       if (btn) {
         btn.disabled = false;
         btn.textContent =
-          "▶️ חקה את ההפעלה";
+          "▶️ בדוק פרופיל חדר Dreame";
       }
     }
   }

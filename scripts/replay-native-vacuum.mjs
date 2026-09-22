@@ -240,6 +240,83 @@ rawSub.on("properties", (changes) => {
   }
 });
 
+async function readNativeProfileSnapshot(label) {
+  const props = [
+    { siid: 4, piid: 10 },
+    { siid: 4, piid: 26 },
+    { siid: 2, piid: 6 },
+    { siid: 4, piid: 50 },
+    { siid: 4, piid: 53 },
+  ];
+
+  try {
+    const result = await client.getProperties(
+      String(device.did),
+      props,
+      { timeoutMs: 12000 }
+    );
+
+    const snapshot = {};
+
+    for (const item of result || []) {
+      const key = `${item?.siid}/${item?.piid}`;
+
+      if (
+        item?.value === null ||
+        item?.value === undefined
+      ) {
+        snapshot[key] = null;
+        continue;
+      }
+
+      if (key === "4/50") {
+        snapshot[key] = {
+          raw:
+            typeof item.value === "string"
+              ? item.value.slice(0, 1500)
+              : item.value,
+          smartHost:
+            parseSmartHost(item.value),
+        };
+        continue;
+      }
+
+      if (key === "4/10") {
+        try {
+          snapshot[key] =
+            typeof item.value === "string"
+              ? JSON.parse(item.value)
+              : item.value;
+        } catch {
+          snapshot[key] =
+            String(item.value).slice(0, 2000);
+        }
+        continue;
+      }
+
+      snapshot[key] = item.value;
+    }
+
+    console.log(
+      `NATIVE PROFILE SNAPSHOT ${label}: ` +
+      JSON.stringify(snapshot)
+    );
+
+    return snapshot;
+  } catch (err) {
+    console.log(
+      `NATIVE PROFILE SNAPSHOT ${label} unavailable: ` +
+      `${err?.message || err}`
+    );
+
+    return {
+      error:
+        err?.message ||
+        String(err),
+    };
+  }
+}
+
 async function writeBestEffort(
   siid,
   piid,
@@ -433,11 +510,12 @@ console.log(
         taskStatus: 18,
       },
       replayStrategy: [
-        "CustomizedCleaning=0",
+        "Read native profile snapshot first",
+        "CustomizedCleaning=1 (use saved per-room cleanset)",
         "SmartHost=0",
         "CleanMode=0",
         "NO AutoMountMop write",
-        "START_CUSTOM selected-room via cleanSegments([7])",
+        "cleanSegments([7]) with NO fan/water override",
         "Require stable MiotState=1",
       ],
     },
@@ -476,16 +554,17 @@ await postEvent("started", {
 });
 
 try {
-  // Match the native run's effective configuration, but deliberately
-  // do NOT touch 4/45 AutoMountMop. The native capture never changed it.
+  const beforeSnapshot =
+    await readNativeProfileSnapshot("before");
+
   await writeBestEffort(
     4,
     26,
-    0,
-    "CustomizedCleaning=0"
+    1,
+    "CustomizedCleaning=1 (use saved room profile)"
   );
 
-  await sleep(250);
+  await sleep(350);
 
   await writeBestEffort(
     4,
@@ -497,7 +576,7 @@ try {
     "SmartHost=0"
   );
 
-  await sleep(250);
+  await sleep(350);
 
   await writeBestEffort(
     2,
@@ -506,26 +585,21 @@ try {
     "CleanMode=0 (Sweeping)"
   );
 
-  await sleep(800);
+  await sleep(900);
+
+  const configuredSnapshot =
+    await readNativeProfileSnapshot("configured");
 
   console.log(
-    "Starting native-profile replay for room 7. " +
-    "No AutoMountMop command is being sent."
+    "Starting SAVED-ROOM native replay for room 7. " +
+    "CustomizedCleaning=1; no fan/water override; no AutoMountMop write."
   );
 
-  // Arm verification BEFORE the command so the first state=1 push
-  // cannot be missed.
   const verifyPromise =
     waitForNativeVacuumMode();
 
   const result =
-    await vacuum.cleanSegments(
-      [7],
-      {
-        repeats: 1,
-        fan: 2,
-      }
-    );
+    await vacuum.cleanSegments([7]);
 
   console.log(
     `NATIVE REPLAY cleanSegments result: ${JSON.stringify(result)}`
@@ -550,22 +624,38 @@ try {
       verification.kind
     );
 
+    const afterSnapshot =
+      await readNativeProfileSnapshot("failed-after-start");
+
     await postEvent("failed", {
       error:
-        "Replay did not enter verified vacuum-only mode",
+        "Saved-room replay did not enter verified vacuum-only mode",
       verification,
+      profileSnapshots: {
+        before: beforeSnapshot,
+        configured: configuredSnapshot,
+        after: afterSnapshot,
+      },
     });
 
     process.exitCode = 2;
   } else {
+    const afterSnapshot =
+      await readNativeProfileSnapshot("verified-after-start");
+
     await postEvent("verified", {
       verification,
+      profileSnapshots: {
+        before: beforeSnapshot,
+        configured: configuredSnapshot,
+        after: afterSnapshot,
+      },
       note:
-        "Robot left running. Replay verified stable MiotState=1.",
+        "Saved-room replay verified stable MiotState=1. Robot left running.",
     });
 
     console.log(
-      "✅ Native-profile replay verified: stable MiotState=1."
+      "✅ SAVED-ROOM replay verified: stable MiotState=1."
     );
   }
 } catch (err) {
