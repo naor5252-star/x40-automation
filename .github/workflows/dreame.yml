@@ -2,7 +2,7 @@ name: Dreame X40 Shortcut
 run-name: Dreame X40 — ${{ inputs.mode }}
 
 concurrency:
-  group: ${{ (inputs.mode == 'smart-run' || inputs.mode == 'stop-and-dock') && 'dreame-x40-cleaning-control' || format('dreame-x40-{0}', github.run_id) }}
+  group: ${{ (inputs.mode == 'smart-run' || inputs.mode == 'stop-and-dock' || inputs.mode == 'replay-native-vacuum') && 'dreame-x40-cleaning-control' || format('dreame-x40-{0}', github.run_id) }}
   cancel-in-progress: true
 
 on:
@@ -239,6 +239,11 @@ jobs:
 
           if [ "$MODE" = "capture-native-vacuum" ]; then
             node scripts/capture-native-vacuum.mjs
+            exit 0
+          fi
+
+          if [ "$MODE" = "replay-native-vacuum" ]; then
+            node scripts/replay-native-vacuum.mjs
             exit 0
           fi
 

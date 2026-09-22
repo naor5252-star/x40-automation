@@ -343,6 +343,22 @@ export class PresenceState {
     }
 
     if (
+      url.pathname === "/api/native-replay/start" &&
+      request.method === "POST"
+    ) {
+      return Response.json(
+        await this.startNativeVacuumReplay()
+      );
+    }
+
+    if (
+      url.pathname === "/native-replay-event" &&
+      request.method === "POST"
+    ) {
+      return this.handleNativeReplayEvent(request);
+    }
+
+    if (
       url.pathname === "/capture-control" &&
       request.method === "GET"
     ) {
@@ -1054,6 +1070,274 @@ export class PresenceState {
     return result;
   }
 
+  async startNativeVacuumReplay() {
+    const [
+      runInfo,
+      capture,
+      replay,
+    ] = await Promise.all([
+      this.ctx.storage.get("runInfo"),
+      this.ctx.storage.get("nativeCaptureInfo"),
+      this.ctx.storage.get("nativeReplayInfo"),
+    ]);
+
+    if (runInfo?.active) {
+      return {
+        action: "replay_blocked_run_active",
+        error:
+          "יש ניקוי אוטומטי פעיל. לא מתחילים בדיקת חיקוי במקביל.",
+      };
+    }
+
+    if (capture?.active) {
+      return {
+        action: "replay_blocked_capture_active",
+        error:
+          "יש הקלטה פעילה. סיים אותה לפני בדיקת החיקוי.",
+      };
+    }
+
+    if (replay?.active) {
+      return {
+        action: "replay_already_active",
+        replay: {
+          ...replay,
+          callbackToken: undefined,
+        },
+      };
+    }
+
+    const config = this.effectiveConfig();
+    const sessionId = crypto.randomUUID();
+    const callbackToken =
+      crypto.randomUUID() + "-" + crypto.randomUUID();
+
+    const info = {
+      sessionId,
+      active: true,
+      status: "starting",
+      roomId: 7,
+      roomName: "חדר שינה ראשי 2",
+      intent: "native-vacuum-replay",
+      startedAt:
+        new Date().toISOString(),
+      verifiedAt: null,
+      failedAt: null,
+      callbackToken,
+      result: null,
+      error: null,
+    };
+
+    await this.ctx.storage.put(
+      "nativeReplayInfo",
+      info
+    );
+
+    let github;
+
+    try {
+      github = await this.dispatchGitHub(
+        "replay-native-vacuum",
+        "",
+        {
+          callbackToken,
+          callbackUrl:
+            config.workerPublicUrl,
+          captureSessionId:
+            sessionId,
+        }
+      );
+    } catch (err) {
+      const failed = {
+        ...info,
+        active: false,
+        status: "failed",
+        error:
+          err?.message ||
+          String(err),
+        failedAt:
+          new Date().toISOString(),
+      };
+
+      await this.ctx.storage.put(
+        "nativeReplayInfo",
+        failed
+      );
+
+      return {
+        action:
+          "replay_dispatch_failed",
+        replay: {
+          ...failed,
+          callbackToken:
+            undefined,
+        },
+      };
+    }
+
+    await this.appendEvent(
+      "native_replay_dispatched",
+      {
+        sessionId,
+        roomId: 7,
+      }
+    );
+
+    return {
+      action: "replay_dispatched",
+      replay: {
+        ...info,
+        callbackToken:
+          undefined,
+      },
+      github,
+    };
+  }
+
+  async handleNativeReplayEvent(request) {
+    let body;
+
+    try {
+      body = await request.json();
+    } catch {
+      return new Response(
+        "Invalid JSON",
+        { status: 400 }
+      );
+    }
+
+    const token =
+      request.headers.get(
+        "X-Capture-Callback-Token"
+      );
+
+    const replay =
+      await this.ctx.storage.get(
+        "nativeReplayInfo"
+      );
+
+    if (
+      !token ||
+      !replay?.callbackToken ||
+      token !== replay.callbackToken ||
+      String(body?.sessionId || "") !==
+        replay.sessionId
+    ) {
+      return new Response(
+        "Unauthorized",
+        { status: 401 }
+      );
+    }
+
+    const event =
+      String(body?.event || "");
+
+    if (event === "started") {
+      const updated = {
+        ...replay,
+        active: true,
+        status: "running",
+        runningAt:
+          new Date().toISOString(),
+        device:
+          body?.device || null,
+        profile:
+          body?.profile || null,
+      };
+
+      await this.ctx.storage.put(
+        "nativeReplayInfo",
+        updated
+      );
+
+      return Response.json({
+        ok: true,
+        event,
+      });
+    }
+
+    if (event === "verified") {
+      const updated = {
+        ...replay,
+        active: false,
+        status: "verified",
+        verifiedAt:
+          new Date().toISOString(),
+        result:
+          body?.verification ||
+          null,
+        note:
+          body?.note || null,
+        callbackToken: null,
+      };
+
+      await this.ctx.storage.put(
+        "nativeReplayInfo",
+        updated
+      );
+
+      await this.appendEvent(
+        "native_replay_verified",
+        {
+          sessionId:
+            replay.sessionId,
+          result:
+            updated.result,
+        }
+      );
+
+      return Response.json({
+        ok: true,
+        event,
+      });
+    }
+
+    if (event === "failed") {
+      const updated = {
+        ...replay,
+        active: false,
+        status: "failed",
+        failedAt:
+          new Date().toISOString(),
+        error:
+          body?.error ||
+          "Replay failed",
+        result:
+          body?.verification ||
+          body?.observed ||
+          null,
+        callbackToken: null,
+      };
+
+      await this.ctx.storage.put(
+        "nativeReplayInfo",
+        updated
+      );
+
+      await this.appendEvent(
+        "native_replay_failed",
+        {
+          sessionId:
+            replay.sessionId,
+          error:
+            updated.error,
+          result:
+            updated.result,
+        }
+      );
+
+      return Response.json({
+        ok: true,
+        event,
+      });
+    }
+
+    return new Response(
+      "Unknown replay event",
+      { status: 400 }
+    );
+  }
+
   async startNativeVacuumCapture() {
     const existing =
       await this.ctx.storage.get("nativeCaptureInfo");
@@ -1574,12 +1858,17 @@ export class PresenceState {
   }
 
   async getDashboardData() {
-    const [state, history, nativeCapture] =
-      await Promise.all([
-        this.getState(),
-        this.ctx.storage.get("eventHistory"),
-        this.ctx.storage.get("nativeCaptureInfo"),
-      ]);
+    const [
+      state,
+      history,
+      nativeCapture,
+      nativeReplay,
+    ] = await Promise.all([
+      this.getState(),
+      this.ctx.storage.get("eventHistory"),
+      this.ctx.storage.get("nativeCaptureInfo"),
+      this.ctx.storage.get("nativeReplayInfo"),
+    ]);
 
     const config = this.effectiveConfig();
 
@@ -1610,6 +1899,12 @@ export class PresenceState {
       nativeCapture: nativeCapture
         ? {
             ...nativeCapture,
+            callbackToken: undefined,
+          }
+        : null,
+      nativeReplay: nativeReplay
+        ? {
+            ...nativeReplay,
             callbackToken: undefined,
           }
         : null,
@@ -2469,7 +2764,10 @@ export default {
       (
         (
           request.method === "POST" &&
-          url.pathname === "/capture-event"
+          (
+            url.pathname === "/capture-event" ||
+            url.pathname === "/native-replay-event"
+          )
         ) ||
         (
           request.method === "GET" &&

@@ -292,6 +292,13 @@ export const dashboardHtml = String.raw`<!doctype html>
           onclick="toggleNativeCapture()">⏺️ התחל הקלטה</button>
         <button id="copyNativeCaptureBtn" class="btn ghost hidden"
           onclick="copyNativeCaptureResult()">📋 העתק תוצאה</button>
+        <button id="nativeReplayBtn" class="btn good hidden"
+          onclick="startNativeReplay()">▶️ חקה את ההפעלה</button>
+      </div>
+
+      <div id="nativeReplayBox" class="hidden" style="margin-top:10px">
+        <span class="pill" id="nativeReplayPill">⚪ טרם הופעל</span>
+        <div class="statusline" id="nativeReplayStatus">—</div>
       </div>
 
       <div class="statusline" id="nativeCaptureStatus">
@@ -916,10 +923,23 @@ export const dashboardHtml = String.raw`<!doctype html>
         "ההקלטה פסיבית ואינה מפעילה את הרובוט.";
     }
 
+    const replayBtn = $("nativeReplayBtn");
+    if (replayBtn) {
+      replayBtn.classList.toggle(
+        "hidden",
+        state !== "completed"
+      );
+    }
+
+    renderNativeReplay(
+      data?.nativeReplay || null
+    );
+
     const shouldFastPoll =
       capture?.active ||
       state === "starting" ||
-      state === "stopping";
+      state === "stopping" ||
+      Boolean(data?.nativeReplay?.active);
 
     if (
       shouldFastPoll &&
@@ -939,6 +959,79 @@ export const dashboardHtml = String.raw`<!doctype html>
       );
       nativeCapturePollTimer = null;
     }
+  }
+
+  function renderNativeReplay(replay) {
+    const box = $("nativeReplayBox");
+    const pill = $("nativeReplayPill");
+    const status = $("nativeReplayStatus");
+
+    if (!box || !pill || !status) return;
+
+    if (!replay) {
+      box.classList.add("hidden");
+      return;
+    }
+
+    box.classList.remove("hidden");
+
+    if (
+      replay.status === "starting" ||
+      replay.status === "running"
+    ) {
+      pill.textContent =
+        replay.status === "starting"
+          ? "🟡 מפעיל חיקוי"
+          : "🟠 בודק מצב בפועל";
+
+      status.textContent =
+        "בדיקת החיקוי מפעילה עכשיו את חדר שינה ראשי 2 בפועל ומוודאת MiotState=1.";
+      return;
+    }
+
+    if (replay.status === "verified") {
+      pill.textContent =
+        "✅ חיקוי אומת — שאיבה בלבד";
+
+      status.textContent =
+        "ה־X40 נכנס ל־MiotState=1 יציב. " +
+        JSON.stringify(
+          replay.result || {}
+        );
+      return;
+    }
+
+    if (replay.status === "failed") {
+      pill.textContent =
+        "❌ החיקוי לא תאם";
+
+      status.textContent =
+        (replay.error || "הבדיקה נכשלה") +
+        " • " +
+        JSON.stringify(
+          replay.result || {}
+        );
+      return;
+    }
+
+    pill.textContent =
+      "⚪ טרם הופעל";
+    status.textContent = "—";
+  }
+
+  async function startNativeReplay() {
+    if (
+      !confirm(
+        "הבדיקה תפעיל עכשיו ניקוי אמיתי של חדר שינה ראשי 2 בשאיבה בלבד. אם הרובוט ייכנס למצב שטיפה, הבדיקה תבטל אותו אוטומטית. להמשיך?"
+      )
+    ) return;
+
+    await doAction(
+      "/api/native-replay/start",
+      "מפעיל חיקוי של ההקלטה"
+    );
+
+    await refresh();
   }
 
   async function toggleNativeCapture() {
