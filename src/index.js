@@ -325,6 +325,38 @@ export class PresenceState {
     }
 
     if (
+      url.pathname === "/api/native-capture/start" &&
+      request.method === "POST"
+    ) {
+      return Response.json(
+        await this.startNativeVacuumCapture()
+      );
+    }
+
+    if (
+      url.pathname === "/api/native-capture/stop" &&
+      request.method === "POST"
+    ) {
+      return Response.json(
+        await this.stopNativeVacuumCapture()
+      );
+    }
+
+    if (
+      url.pathname === "/capture-control" &&
+      request.method === "GET"
+    ) {
+      return this.handleNativeCaptureControl(request);
+    }
+
+    if (
+      url.pathname === "/capture-event" &&
+      request.method === "POST"
+    ) {
+      return this.handleNativeCaptureEvent(request);
+    }
+
+    if (
       url.pathname === "/api/stop-dock" &&
       request.method === "POST"
     ) {
@@ -1022,6 +1054,362 @@ export class PresenceState {
     return result;
   }
 
+  async startNativeVacuumCapture() {
+    const existing =
+      await this.ctx.storage.get("nativeCaptureInfo");
+
+    if (existing?.active) {
+      return {
+        action: "capture_already_active",
+        capture: existing,
+      };
+    }
+
+    const runInfo =
+      await this.ctx.storage.get("runInfo");
+
+    if (runInfo?.active) {
+      return {
+        action: "capture_blocked_run_active",
+        error:
+          "יש ניקוי אוטומטי פעיל. עצור/סיים אותו לפני הקלטה.",
+      };
+    }
+
+    const config = this.effectiveConfig();
+    const sessionId = crypto.randomUUID();
+    const callbackToken =
+      crypto.randomUUID() + "-" + crypto.randomUUID();
+
+    const capture = {
+      sessionId,
+      active: true,
+      status: "starting",
+      roomId: 7,
+      roomName: "חדר שינה ראשי 2",
+      intent: "vacuum-only",
+      stopRequested: false,
+      startedAt: new Date().toISOString(),
+      recordingAt: null,
+      stoppedAt: null,
+      completedAt: null,
+      entryCount: 0,
+      callbackToken,
+      result: null,
+      error: null,
+    };
+
+    await this.ctx.storage.put(
+      "nativeCaptureInfo",
+      capture
+    );
+
+    let github;
+    try {
+      github = await this.dispatchGitHub(
+        "capture-native-vacuum",
+        "",
+        {
+          callbackToken,
+          callbackUrl: config.workerPublicUrl,
+          captureSessionId: sessionId,
+        }
+      );
+    } catch (err) {
+      const failed = {
+        ...capture,
+        active: false,
+        status: "failed",
+        error: err?.message || String(err),
+        failedAt: new Date().toISOString(),
+      };
+
+      await this.ctx.storage.put(
+        "nativeCaptureInfo",
+        failed
+      );
+
+      return {
+        action: "capture_dispatch_failed",
+        capture: failed,
+      };
+    }
+
+    await this.appendEvent(
+      "native_capture_dispatched",
+      {
+        sessionId,
+        roomId: 7,
+      }
+    );
+
+    return {
+      action: "capture_dispatched",
+      capture: {
+        ...capture,
+        callbackToken: undefined,
+      },
+      github,
+    };
+  }
+
+  async stopNativeVacuumCapture() {
+    const capture =
+      await this.ctx.storage.get("nativeCaptureInfo");
+
+    if (!capture?.active) {
+      return {
+        action: "capture_not_active",
+        capture: capture || null,
+      };
+    }
+
+    const updated = {
+      ...capture,
+      status: "stopping",
+      stopRequested: true,
+      stopRequestedAt:
+        new Date().toISOString(),
+    };
+
+    await this.ctx.storage.put(
+      "nativeCaptureInfo",
+      updated
+    );
+
+    await this.appendEvent(
+      "native_capture_stop_requested",
+      {
+        sessionId: capture.sessionId,
+      }
+    );
+
+    return {
+      action: "capture_stop_requested",
+      capture: {
+        ...updated,
+        callbackToken: undefined,
+      },
+    };
+  }
+
+  async handleNativeCaptureControl(request) {
+    const token =
+      request.headers.get(
+        "X-Capture-Callback-Token"
+      );
+
+    const url = new URL(request.url);
+    const sessionId =
+      String(
+        url.searchParams.get("sessionId") ||
+          ""
+      );
+
+    const capture =
+      await this.ctx.storage.get("nativeCaptureInfo");
+
+    if (
+      !token ||
+      !capture?.callbackToken ||
+      token !== capture.callbackToken ||
+      sessionId !== capture.sessionId
+    ) {
+      return new Response(
+        "Unauthorized",
+        { status: 401 }
+      );
+    }
+
+    return Response.json({
+      ok: true,
+      sessionId: capture.sessionId,
+      stopRequested:
+        Boolean(capture.stopRequested),
+      status: capture.status,
+    });
+  }
+
+  async handleNativeCaptureEvent(request) {
+    let body;
+    try {
+      body = await request.json();
+    } catch {
+      return new Response(
+        "Invalid JSON",
+        { status: 400 }
+      );
+    }
+
+    const token =
+      request.headers.get(
+        "X-Capture-Callback-Token"
+      );
+
+    const capture =
+      await this.ctx.storage.get("nativeCaptureInfo");
+
+    if (
+      !token ||
+      !capture?.callbackToken ||
+      token !== capture.callbackToken ||
+      String(body?.sessionId || "") !==
+        capture.sessionId
+    ) {
+      return new Response(
+        "Unauthorized",
+        { status: 401 }
+      );
+    }
+
+    const event =
+      String(body?.event || "");
+
+    if (event === "started") {
+      const updated = {
+        ...capture,
+        active: true,
+        status: "recording",
+        recordingAt:
+          new Date().toISOString(),
+        device: body?.device || null,
+      };
+
+      await this.ctx.storage.put(
+        "nativeCaptureInfo",
+        updated
+      );
+
+      await this.appendEvent(
+        "native_capture_started",
+        {
+          sessionId: capture.sessionId,
+          device: body?.device || null,
+        }
+      );
+
+      return Response.json({
+        ok: true,
+        event,
+      });
+    }
+
+    if (event === "heartbeat") {
+      const updated = {
+        ...capture,
+        active: true,
+        status:
+          capture.stopRequested
+            ? "stopping"
+            : "recording",
+        heartbeatAt:
+          new Date().toISOString(),
+        entryCount:
+          Number(body?.entries || 0),
+        liveStateSequence:
+          Array.isArray(
+            body?.stateSequence
+          )
+            ? body.stateSequence.slice(-30)
+            : [],
+      };
+
+      await this.ctx.storage.put(
+        "nativeCaptureInfo",
+        updated
+      );
+
+      return Response.json({
+        ok: true,
+        event,
+      });
+    }
+
+    if (event === "completed") {
+      const result =
+        body?.result &&
+        typeof body.result === "object"
+          ? body.result
+          : null;
+
+      const updated = {
+        ...capture,
+        active: false,
+        status: "completed",
+        stopRequested: false,
+        stoppedAt:
+          new Date().toISOString(),
+        completedAt:
+          new Date().toISOString(),
+        entryCount:
+          Number(
+            result?.entries ||
+            capture.entryCount ||
+            0
+          ),
+        result,
+        callbackToken: null,
+      };
+
+      await this.ctx.storage.put(
+        "nativeCaptureInfo",
+        updated
+      );
+
+      await this.appendEvent(
+        "native_capture_completed",
+        {
+          sessionId: capture.sessionId,
+          entries: updated.entryCount,
+          profile:
+            result?.profile || null,
+        }
+      );
+
+      return Response.json({
+        ok: true,
+        event,
+      });
+    }
+
+    if (event === "failed") {
+      const updated = {
+        ...capture,
+        active: false,
+        status: "failed",
+        error:
+          body?.error ||
+          "capture failed",
+        failedAt:
+          new Date().toISOString(),
+        callbackToken: null,
+      };
+
+      await this.ctx.storage.put(
+        "nativeCaptureInfo",
+        updated
+      );
+
+      await this.appendEvent(
+        "native_capture_failed",
+        {
+          sessionId: capture.sessionId,
+          error: updated.error,
+        }
+      );
+
+      return Response.json({
+        ok: true,
+        event,
+      });
+    }
+
+    return new Response(
+      "Unknown capture event",
+      { status: 400 }
+    );
+  }
+
   async forceRunNow() {
     const now = this.localNow();
     const config = this.effectiveConfig();
@@ -1186,10 +1574,12 @@ export class PresenceState {
   }
 
   async getDashboardData() {
-    const [state, history] = await Promise.all([
-      this.getState(),
-      this.ctx.storage.get("eventHistory"),
-    ]);
+    const [state, history, nativeCapture] =
+      await Promise.all([
+        this.getState(),
+        this.ctx.storage.get("eventHistory"),
+        this.ctx.storage.get("nativeCaptureInfo"),
+      ]);
 
     const config = this.effectiveConfig();
 
@@ -1217,6 +1607,12 @@ export class PresenceState {
         },
         workerPublicUrl: config.workerPublicUrl,
       },
+      nativeCapture: nativeCapture
+        ? {
+            ...nativeCapture,
+            callbackToken: undefined,
+          }
+        : null,
       history: Array.isArray(history)
         ? history.slice(0, 80)
         : [],
@@ -1524,6 +1920,8 @@ export class PresenceState {
             String(extra.callbackUrl || ""),
           callback_token:
             String(extra.callbackToken || ""),
+          capture_session_id:
+            String(extra.captureSessionId || ""),
           ran_today:
             String(Boolean(extra.ranToday)),
           fallback_used:
@@ -2067,11 +2465,29 @@ export default {
         )
       );
 
+    const captureCallbackCandidate =
+      (
+        (
+          request.method === "POST" &&
+          url.pathname === "/capture-event"
+        ) ||
+        (
+          request.method === "GET" &&
+          url.pathname === "/capture-control"
+        )
+      ) &&
+      Boolean(
+        request.headers.get(
+          "X-Capture-Callback-Token"
+        )
+      );
+
     if (
       !webhookAuthorized &&
       !widgetAuthorized &&
       !runCallbackCandidate &&
-      !waterCallbackCandidate
+      !waterCallbackCandidate &&
+      !captureCallbackCandidate
     ) {
       return new Response("Unauthorized", {
         status: 401,
@@ -2086,7 +2502,18 @@ export default {
     const id = env.PRESENCE.idFromName("home");
     const stub = env.PRESENCE.get(id);
 
-    await stub.fetch("https://internal/check");
+    const dreameScheduledCheck = stub.fetch("https://internal/check");
+    const electraScheduledSample = triggerElectraTemperatureSample(env);
+    const scheduledResults = await Promise.allSettled([
+      dreameScheduledCheck,
+      electraScheduledSample,
+    ]);
+    if (scheduledResults[0].status === "rejected") {
+      console.log("Dreame scheduled check failed:", scheduledResults[0].reason?.message || String(scheduledResults[0].reason));
+    }
+    if (scheduledResults[1].status === "rejected") {
+      console.log("Electra scheduled sample failed:", scheduledResults[1].reason?.message || String(scheduledResults[1].reason));
+    }
     await stub.fetch(
       "https://internal/evening-check"
     );

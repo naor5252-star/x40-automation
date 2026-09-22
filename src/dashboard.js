@@ -273,6 +273,44 @@ export const dashboardHtml = String.raw`<!doctype html>
       <div class="statusline" id="lastAction">—</div>
     </div>
 
+    <div class="card section" id="nativeCaptureCard">
+      <div class="row" style="justify-content:space-between">
+        <div>
+          <h2>🎙️ לימוד הפעלה ידנית — חדר שינה ראשי 2</h2>
+          <div class="help">
+            לחץ <b>התחל הקלטה</b>, המתן שיופיע <b>🔴 מקליט</b>,
+            ואז פתח את Dreamehome והפעל ידנית את חדר שינה ראשי 2
+            במצב <b>שאיבה בלבד</b>. בסיום החלק שרצית ללמד חזור לכאן
+            ולחץ <b>סיים הקלטה</b>.
+          </div>
+        </div>
+        <span class="pill" id="nativeCapturePill">⚪ לא פעיל</span>
+      </div>
+
+      <div class="row section">
+        <button id="nativeCaptureBtn" class="btn primary"
+          onclick="toggleNativeCapture()">⏺️ התחל הקלטה</button>
+        <button id="copyNativeCaptureBtn" class="btn ghost hidden"
+          onclick="copyNativeCaptureResult()">📋 העתק תוצאה</button>
+      </div>
+
+      <div class="statusline" id="nativeCaptureStatus">
+        ההקלטה פסיבית ואינה מפעילה את הרובוט.
+      </div>
+
+      <p class="help">
+        ⚠️ סיום ההקלטה מפסיק רק את ההאזנה — הוא <b>לא</b> עוצר את
+        הניקוי שהפעלת באפליקציית Dreamehome. ההקלטה אוספת את
+        MQTT/MIoT שהרובוט מדווח בפועל; היא לא מפענחת את בקשת ה־HTTPS
+        המוצפנת של אפליקציית Dreamehome.
+      </p>
+
+      <details id="nativeCaptureDetails" class="hidden">
+        <summary>תוצאת ההקלטה האחרונה</summary>
+        <pre id="nativeCaptureResult">{}</pre>
+      </details>
+    </div>
+
     <div class="grid grid2 section">
       <div class="card">
         <h2>סטטוס אוטומציה</h2>
@@ -431,6 +469,7 @@ export const dashboardHtml = String.raw`<!doctype html>
   let settingsHydrated = false;
   let savingSettings = false;
   let latestServerSettings = null;
+  let nativeCapturePollTimer = null;
 
   const $ = (id) => document.getElementById(id);
 
@@ -807,8 +846,160 @@ export const dashboardHtml = String.raw`<!doctype html>
     updateSettingsSaveUI();
   }
 
+  function renderNativeCapture(capture) {
+    const pill = $("nativeCapturePill");
+    const button = $("nativeCaptureBtn");
+    const status = $("nativeCaptureStatus");
+    const details = $("nativeCaptureDetails");
+    const resultBox = $("nativeCaptureResult");
+    const copyBtn = $("copyNativeCaptureBtn");
+
+    if (!pill || !button || !status) return;
+
+    const state = capture?.status || "idle";
+
+    if (state === "starting") {
+      pill.textContent = "🟡 מתחיל מאזין";
+      button.textContent = "ממתין ל־MQTT…";
+      button.disabled = true;
+      status.textContent =
+        "GitHub Action עולה ומתחבר ל־Dreame. אל תפעיל עדיין את החדר.";
+    } else if (state === "recording") {
+      pill.textContent = "🔴 מקליט";
+      button.textContent = "⏹️ סיים הקלטה";
+      button.disabled = false;
+      button.className = "btn danger";
+      status.textContent =
+        "מקליט עכשיו. אפשר לעבור ל־Dreamehome ולהפעיל ידנית את חדר שינה ראשי 2 בשאיבה בלבד. " +
+        "אירועים שנקלטו: " + Number(capture?.entryCount || 0);
+    } else if (state === "stopping") {
+      pill.textContent = "🟠 מסיים";
+      button.textContent = "מסיים הקלטה…";
+      button.disabled = true;
+      status.textContent =
+        "נשלחה בקשת עצירה. ממתין לסיכום מהמאזין.";
+    } else if (state === "completed") {
+      pill.textContent = "✅ הקלטה הושלמה";
+      button.textContent = "⏺️ הקלטה חדשה";
+      button.disabled = false;
+      button.className = "btn primary";
+      status.textContent =
+        "ההקלטה נשמרה. אירועים: " +
+        Number(capture?.entryCount || 0) +
+        " • הסתיים: " + fmt(capture?.completedAt);
+
+      if (details && resultBox && capture?.result) {
+        details.classList.remove("hidden");
+        resultBox.textContent =
+          JSON.stringify(capture.result, null, 2);
+      }
+      if (copyBtn) {
+        copyBtn.classList.toggle(
+          "hidden",
+          !capture?.result
+        );
+      }
+    } else if (state === "failed") {
+      pill.textContent = "🔴 הקלטה נכשלה";
+      button.textContent = "נסה שוב";
+      button.disabled = false;
+      button.className = "btn primary";
+      status.textContent =
+        "שגיאה: " +
+        (capture?.error || "לא ידוע");
+    } else {
+      pill.textContent = "⚪ לא פעיל";
+      button.textContent = "⏺️ התחל הקלטה";
+      button.disabled = false;
+      button.className = "btn primary";
+      status.textContent =
+        "ההקלטה פסיבית ואינה מפעילה את הרובוט.";
+    }
+
+    const shouldFastPoll =
+      capture?.active ||
+      state === "starting" ||
+      state === "stopping";
+
+    if (
+      shouldFastPoll &&
+      !nativeCapturePollTimer
+    ) {
+      nativeCapturePollTimer =
+        setInterval(
+          () => refresh().catch(() => {}),
+          3000
+        );
+    } else if (
+      !shouldFastPoll &&
+      nativeCapturePollTimer
+    ) {
+      clearInterval(
+        nativeCapturePollTimer
+      );
+      nativeCapturePollTimer = null;
+    }
+  }
+
+  async function toggleNativeCapture() {
+    const capture = data?.nativeCapture;
+
+    if (
+      capture?.active &&
+      !capture?.stopRequested
+    ) {
+      if (
+        !confirm(
+          "לסיים את ההקלטה? פעולה זו אינה עוצרת את הרובוט."
+        )
+      ) return;
+
+      await doAction(
+        "/api/native-capture/stop",
+        "מסיים הקלטה"
+      );
+      await refresh();
+      return;
+    }
+
+    if (
+      !confirm(
+        "להתחיל הקלטה פסיבית? אחרי שהסטטוס יהפוך ל־🔴 מקליט, הפעל ידנית ב־Dreamehome את חדר שינה ראשי 2 בשאיבה בלבד."
+      )
+    ) return;
+
+    await doAction(
+      "/api/native-capture/start",
+      "מתחיל הקלטה"
+    );
+    await refresh();
+  }
+
+  async function copyNativeCaptureResult() {
+    const result =
+      data?.nativeCapture?.result;
+
+    if (!result) {
+      toast("אין תוצאה להעתקה", "bad");
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(
+        JSON.stringify(result, null, 2)
+      );
+      toast("תוצאת ההקלטה הועתקה", "ok");
+    } catch {
+      toast(
+        "לא ניתן להעתיק אוטומטית — פתח את תוצאת ההקלטה והעתק ידנית.",
+        "bad"
+      );
+    }
+  }
+
   function render(d) {
     data = d;
+    renderNativeCapture(d.nativeCapture);
     $("clock").textContent =
       (d.localTime?.date || "") + " • " + (d.localTime?.time || "");
 

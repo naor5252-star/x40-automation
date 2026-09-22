@@ -16,6 +16,7 @@ on:
         options:
           - capture
           - capture-cleangenius
+          - capture-native-vacuum
           - map-rooms
           - list
           - run-id
@@ -125,6 +126,12 @@ on:
         default: ""
         type: string
 
+      capture_session_id:
+        description: "Native capture session ID"
+        required: false
+        default: ""
+        type: string
+
       test_delay_seconds:
         description: "Telegram flow test delay between stages (seconds)"
         required: false
@@ -182,6 +189,8 @@ jobs:
           DREAME_RETURNED_BY: ${{ inputs.returned_by }}
           DREAME_CALLBACK_URL: ${{ inputs.callback_url }}
           DREAME_CALLBACK_TOKEN: ${{ inputs.callback_token }}
+          DREAME_CAPTURE_SESSION_ID: ${{ inputs.capture_session_id }}
+          DREAME_NATIVE_CAPTURE_MAX_SECONDS: ${{ vars.DREAME_NATIVE_CAPTURE_MAX_SECONDS || '1200' }}
           DREAME_RAN_TODAY: ${{ inputs.ran_today }}
           DREAME_FALLBACK_USED: ${{ inputs.fallback_used }}
 
@@ -225,6 +234,11 @@ jobs:
 
           if [ "$MODE" = "capture-cleangenius" ]; then
             node scripts/capture-cleangenius.mjs
+            exit 0
+          fi
+
+          if [ "$MODE" = "capture-native-vacuum" ]; then
+            node scripts/capture-native-vacuum.mjs
             exit 0
           fi
 
