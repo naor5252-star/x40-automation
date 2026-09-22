@@ -1073,530 +1073,57 @@ function createRuntimeConfigMonitor(phase) {
 }
 
 
-const mopSafetyState = {
-  autoMount: null,
-  inStation: null,
-  padInstalled: null,
-  miotState: null,
-  sawReturnRemoveMop: false,
-  removeSettledAt: null,
-  lastPropertyAt: null,
-};
-
-function updateMopSafetyFromProperties(changes) {
-  for (const change of changes || []) {
-    const siid = Number(change?.siid);
-    const piid = Number(change?.piid);
-    if (
-      change?.value === null ||
-      change?.value === undefined ||
-      change?.value === ""
-    ) {
-      continue;
-    }
-
-    const value = Number(change.value);
-
-    if (!Number.isFinite(value)) continue;
-
-    if (siid === 4 && piid === 45) {
-      mopSafetyState.autoMount = value;
-      mopSafetyState.lastPropertyAt = Date.now();
-      console.log(`MOP SAFETY AutoMountMop actual=${value}`);
-      continue;
-    }
-
-    if (siid === 4 && piid === 52) {
-      mopSafetyState.inStation = value;
-      mopSafetyState.lastPropertyAt = Date.now();
-      console.log(`MOP SAFETY MopInStation actual=${value}`);
-      continue;
-    }
-
-    if (siid === 4 && piid === 53) {
-      mopSafetyState.padInstalled = value;
-      mopSafetyState.lastPropertyAt = Date.now();
-      console.log(`MOP SAFETY MopPadInstalled actual=${value}`);
-    }
-  }
-}
-
-function updateMopSafetyFromVacuumState(state) {
-  if (
-    state?.miotStateRaw === null ||
-    state?.miotStateRaw === undefined ||
-    state?.miotStateRaw === ""
-  ) {
-    return;
-  }
-
-  const value = Number(state.miotStateRaw);
-  if (!Number.isFinite(value)) return;
-
-  const previous = mopSafetyState.miotState;
-  mopSafetyState.miotState = value;
-
-  if (value === 18) {
-    mopSafetyState.sawReturnRemoveMop = true;
-    mopSafetyState.removeSettledAt = null;
-    console.log("MOP SAFETY MiotState=18 ReturnRemoveMop");
-    return;
-  }
-
-  if (
-    mopSafetyState.sawReturnRemoveMop &&
-    value !== 18 &&
-    (value === 13 || value === 6)
-  ) {
-    mopSafetyState.removeSettledAt = Date.now();
-    console.log(
-      `MOP SAFETY mop-removal sequence settled at MiotState=${value}`
-    );
-  }
-
-  if (previous !== value) {
-    console.log(
-      `MOP SAFETY MiotState ${previous ?? "unknown"} -> ${value}`
-    );
-  }
-}
-
-rawSub.on("properties", updateMopSafetyFromProperties);
-vacuum.on("change", updateMopSafetyFromVacuumState);
-
-function vacuumOnlyMopSafetySnapshot() {
-  const rawInStation = mopSafetyState.inStation;
-  const rawPadInstalled = mopSafetyState.padInstalled;
-
-  const inStation =
-    rawInStation === null ||
-    rawInStation === undefined ||
-    rawInStation === ""
-      ? null
-      : Number(rawInStation);
-
-  const padInstalled =
-    rawPadInstalled === null ||
-    rawPadInstalled === undefined ||
-    rawPadInstalled === ""
-      ? null
-      : Number(rawPadInstalled);
-
-  const stationConfirmed =
-    inStation !== null &&
-    Number.isFinite(inStation) &&
-    (inStation === 1 || inStation === 4);
-
-  // Diagnostic only. Do NOT use this alone as permission to start:
-  // on this X40 it can toggle while mop/CleanGenius work is active.
-  const padNotInstalledDiagnostic =
-    padInstalled !== null &&
-    Number.isFinite(padInstalled) &&
-    padInstalled === 0;
-
-  const removalSequenceConfirmed =
-    Boolean(mopSafetyState.removeSettledAt);
-
-  return {
-    safe:
-      stationConfirmed ||
-      removalSequenceConfirmed,
-    stationConfirmed,
-    padNotInstalledDiagnostic,
-    removalSequenceConfirmed,
-    autoMount: mopSafetyState.autoMount,
-    inStation,
-    padInstalled,
-    miotState: mopSafetyState.miotState,
-    sawReturnRemoveMop:
-      mopSafetyState.sawReturnRemoveMop,
-  };
-}
-
-async function readVacuumOnlyMopSafetyOnce() {
-  try {
-    const result = await client.getProperties(
-      String(device.did),
-      [
-        { siid: 4, piid: 45 },
-        { siid: 4, piid: 52 },
-        { siid: 4, piid: 53 },
-      ],
-      { timeoutMs: 10000 }
-    );
-
-    updateMopSafetyFromProperties(
-      (result || [])
-        .filter(
-          (x) =>
-            (x?.code === undefined || Number(x.code) === 0) &&
-            x?.value !== undefined
-        )
-        .map((x) => ({
-          siid: x.siid,
-          piid: x.piid,
-          value: x.value,
-        }))
-    );
-
-    return vacuumOnlyMopSafetySnapshot();
-  } catch (err) {
-    if (isNoAck(err)) {
-      console.log(
-        "MOP SAFETY readback unavailable (no HTTP ACK); " +
-        "continuing with MQTT/state evidence."
-      );
-      return vacuumOnlyMopSafetySnapshot();
-    }
-    throw err;
-  }
-}
-
-async function waitForVacuumOnlyMopsParked(timeoutMs = 45000) {
-  let snapshot = await readVacuumOnlyMopSafetyOnce();
-
-  if (snapshot.safe) {
-    console.log(
-      "VACUUM-ONLY MOP SAFETY VERIFIED immediately: " +
-      JSON.stringify(snapshot)
-    );
-    return snapshot;
-  }
-
-  const deadline = Date.now() + timeoutMs;
-  let nextReadbackAt = Date.now() + 12000;
-
-  while (Date.now() < deadline) {
-    snapshot = vacuumOnlyMopSafetySnapshot();
-
-    if (snapshot.safe) {
-      console.log(
-        "VACUUM-ONLY MOP SAFETY VERIFIED: " +
-        JSON.stringify(snapshot)
-      );
-      return snapshot;
-    }
-
-    if (Date.now() >= nextReadbackAt) {
-      snapshot = await readVacuumOnlyMopSafetyOnce();
-
-      if (snapshot.safe) {
-        console.log(
-          "VACUUM-ONLY MOP SAFETY VERIFIED by readback: " +
-          JSON.stringify(snapshot)
-        );
-        return snapshot;
-      }
-
-      nextReadbackAt = Date.now() + 12000;
-    }
-
-    await sleep(750);
-  }
-
-  snapshot = vacuumOnlyMopSafetySnapshot();
-
-  console.log(
-    "VACUUM-ONLY MOP SAFETY NOT VERIFIED: " +
-    JSON.stringify(snapshot)
-  );
-
-  return snapshot;
-}
-
-
-function numericMiotState(value) {
-  if (value === null || value === undefined || value === "") return null;
-  const n = Number(value);
-  return Number.isFinite(n) ? n : null;
-}
-
-async function seedMiotStateForVacuumPrep(reason = "initial") {
-  const cached = numericMiotState(vacuum.state?.miotStateRaw);
-  if (cached !== null) return { state: cached, via: "cache" };
-
-  try {
-    const cloud = await vacuum.refreshFromCloud();
-    const state = numericMiotState(
-      cloud?.state?.miotStateRaw ?? vacuum.state?.miotStateRaw
-    );
-    console.log(
-      `VACUUM-ONLY PREP state seed (${reason}) cloud: ` +
-      `kind=${cloud?.kind || "unknown"} MiotState=${state ?? "unknown"}`
-    );
-    if (state !== null) return { state, via: "cloud-device-list" };
-  } catch (err) {
-    console.log(`VACUUM-ONLY PREP cloud state seed unavailable: ${err?.message || err}`);
-  }
-
-  try {
-    const refreshed = await vacuum.refresh({ timeoutMs: 10000 });
-    const state = numericMiotState(
-      refreshed?.state?.miotStateRaw ?? vacuum.state?.miotStateRaw
-    );
-    console.log(
-      `VACUUM-ONLY PREP state seed (${reason}) refresh: ` +
-      `kind=${refreshed?.kind || "unknown"} MiotState=${state ?? "unknown"}`
-    );
-    if (state !== null) return { state, via: "miot-refresh" };
-  } catch (err) {
-    console.log(`VACUUM-ONLY PREP property refresh unavailable: ${err?.message || err}`);
-  }
-
-  try {
-    const result = await client.getProperties(
-      String(device.did), [{ siid: 2, piid: 1 }], { timeoutMs: 10000 }
-    );
-    const item = Array.isArray(result)
-      ? result.find(x =>
-          Number(x?.siid) === 2 &&
-          Number(x?.piid) === 1 &&
-          (x?.code === undefined || Number(x.code) === 0))
-      : null;
-    const state = numericMiotState(item?.value);
-    console.log(
-      `VACUUM-ONLY PREP state seed (${reason}) direct 2/1: ` +
-      `MiotState=${state ?? "unknown"}`
-    );
-    if (state !== null) return { state, via: "direct-readback" };
-  } catch (err) {
-    console.log(`VACUUM-ONLY PREP direct state read unavailable: ${err?.message || err}`);
-  }
-
-  return { state: null, via: "unavailable" };
-}
-
-async function waitForRobotSettledForModeChange(
-  timeoutMs = 900000,
-  stableMs = 5000
-) {
-  const deadline = Date.now() + timeoutMs;
-  const unknownDeadline = Date.now() + Math.min(timeoutMs, 90000);
-  let readySince = null;
-  let lastLogged = Symbol("unset");
-  let lastProgressLogAt = Date.now();
-  let nextStateSeedAt = 0;
-  let localState = null;
-  let localStateVia = "none";
-
-  console.log("VACUUM-ONLY PREP: waiting for dock/post-clean cycle to settle.");
-
-  while (Date.now() < deadline) {
-    const cached = numericMiotState(vacuum.state?.miotStateRaw);
-    if (cached !== null) {
-      localState = cached;
-      localStateVia = "mqtt/cache";
-    } else if (localState === null && Date.now() >= nextStateSeedAt) {
-      const seeded = await seedMiotStateForVacuumPrep(
-        nextStateSeedAt === 0 ? "initial" : "retry"
-      );
-      if (seeded.state !== null) {
-        localState = seeded.state;
-        localStateVia = seeded.via;
-      }
-      nextStateSeedAt = Date.now() + 15000;
-    }
-
-    const state = numericMiotState(vacuum.state?.miotStateRaw) ?? localState;
-
-    if (state !== lastLogged) {
-      console.log(
-        `VACUUM-ONLY PREP MiotState=${state ?? "unknown"} ` +
-        `via=${state === null ? "none" : localStateVia}`
-      );
-      lastLogged = state;
-    }
-
-    const ready = state === 2 || state === 6 || state === 8 || state === 13;
-    if (ready) {
-      if (readySince === null) readySince = Date.now();
-      if (Date.now() - readySince >= stableMs) {
-        console.log(
-          `VACUUM-ONLY PREP ready: MiotState=${state} ` +
-          `stable=${Date.now()-readySince}ms via=${localStateVia}`
-        );
-        return { kind: "ready", miotState: state, via: localStateVia };
-      }
-    } else {
-      readySince = null;
-    }
-
-    if (state === null && Date.now() >= unknownDeadline) {
-      return { kind: "state-unavailable", miotState: null, via: "none" };
-    }
-
-    if (Date.now() - lastProgressLogAt >= 30000) {
-      console.log(
-        "VACUUM-ONLY PREP still waiting for dock to finish " +
-        `(MiotState=${state ?? "unknown"}, ` +
-        `via=${state === null ? "none" : localStateVia}, ` +
-        `remaining=${Math.max(0,Math.ceil((deadline-Date.now())/1000))}s)`
-      );
-      lastProgressLogAt = Date.now();
-    }
-    await sleep(500);
-  }
-
-  const state = numericMiotState(vacuum.state?.miotStateRaw) ?? localState;
-  return {
-    kind: "timeout",
-    miotState: state,
-    via: state === null ? "none" : localStateVia,
-  };
-}
-
-async function ensureVacuumOnlyMopsParked() {
-  const ready =
-    await waitForRobotSettledForModeChange(
-      900000,
-      5000
-    );
-
-  if (ready.kind !== "ready") {
-    const err = new Error(
-      ready.kind === "state-unavailable"
-        ? "Robot state unavailable before vacuum-only room"
-        : "Robot did not settle after previous room/dock cycle"
-    );
-    err.code =
-      ready.kind === "state-unavailable"
-        ? "VACUUM_ONLY_STATE_UNAVAILABLE"
-        : "VACUUM_ONLY_ROBOT_NOT_READY";
-    err.details = ready;
-    throw err;
-  }
-
-  console.log(
-    "Preparing true vacuum-only mode: " +
-    "AutoMountMop ON + SmartHost OFF + Sweeping."
-  );
-
-  // Clear evidence from the previous room.
-  mopSafetyState.sawReturnRemoveMop = false;
-  mopSafetyState.removeSettledAt = null;
-
-  await writeProperty(4, 45, 1, "AutoMountMop=1");
-  await sleep(350);
-
-  await writeSmartHostBestEffort(0);
-
-  // 0 = Sweeping / vacuum-only.
-  await setCleanMode(0);
-
-  // Give the device time to perform an explicit remove-mop sequence
-  // if it chooses to do so. No ACK/echo is NOT treated as success.
-  const snapshot =
-    await waitForVacuumOnlyMopsParked(60000);
-
-  if (snapshot.safe) {
-    console.log(
-      "VACUUM-ONLY PRE-START PHYSICAL EVIDENCE: " +
-      JSON.stringify(snapshot)
-    );
-  } else {
-    console.log(
-      "VACUUM-ONLY PRE-START physical evidence unavailable; " +
-      "will require MiotState=1 after START_CUSTOM. " +
-      JSON.stringify(snapshot)
-    );
-  }
-
-  return snapshot;
-}
-
-async function waitForVacuumOnlyActualMode(
-  timeoutMs = 120000,
+function waitForNativeVacuumOnlyMode(
+  timeoutMs = 90000,
   stableVacuumMs = 8000,
-  state12GraceMs = 25000
+  state12GraceMs = 15000
 ) {
   return new Promise((resolve) => {
     let settled = false;
-    let state1Timer = null;
-    let state12Timer = null;
-    let lastMiotState = null;
-    let lastCleanMode = null;
-    let sawRemoveMop = false;
+    let state1Since = null;
+    let state12Since = null;
 
-    const seen = [];
-    const cleanModes = [];
+    const startedAt = Date.now();
 
-    const clearState1Timer = () => {
-      if (state1Timer) {
-        clearTimeout(state1Timer);
-        state1Timer = null;
+    const observed = {
+      miotState: null,
+      cleanMode: null,
+      smartHost: null,
+      mopPadInstalled: null,
+      taskStatus: null,
+    };
+
+    const stateSequence = [];
+    const cleanModeSequence = [];
+
+    const rememberState = (raw) => {
+      const n = Number(raw);
+      if (!Number.isFinite(n)) return;
+
+      observed.miotState = n;
+
+      if (stateSequence[stateSequence.length - 1] !== n) {
+        stateSequence.push(n);
+        console.log(
+          `NATIVE VACUUM VERIFY MiotState=${n}`
+        );
       }
     };
 
-    const clearState12Timer = () => {
-      if (state12Timer) {
-        clearTimeout(state12Timer);
-        state12Timer = null;
-      }
-    };
-
-    const cleanup = () => {
-      clearState1Timer();
-      clearState12Timer();
-      clearTimeout(overallTimer);
-      vacuum.off("change", onChange);
-      rawSub.off("properties", onProperties);
-    };
-
-    const done = (result) => {
-      if (settled) return;
-      settled = true;
-      cleanup();
-
-      resolve({
-        ...result,
-        seen,
-        cleanModes,
-        sawRemoveMop,
-        lastMiotState,
-        lastCleanMode,
-      });
-    };
-
-    const maybeStartState12Grace = () => {
+    const onVacuumChange = (state) => {
       if (
-        lastMiotState !== 12 ||
-        sawRemoveMop ||
-        state12Timer ||
-        settled
+        state?.miotStateRaw !== null &&
+        state?.miotStateRaw !== undefined &&
+        state?.miotStateRaw !== ""
       ) {
-        return;
+        rememberState(state.miotStateRaw);
       }
-
-      console.log(
-        "VACUUM-ONLY START VERIFY: MiotState=12 observed; " +
-        `allowing ${state12GraceMs}ms for automatic mop-removal transition.`
-      );
-
-      state12Timer = setTimeout(() => {
-        state12Timer = null;
-
-        if (
-          !settled &&
-          lastMiotState === 12 &&
-          !sawRemoveMop
-        ) {
-          done({
-            kind: "wrong-mode",
-            reason: "persistent-vacuum-and-mop-state",
-            miotState: 12,
-          });
-        }
-      }, state12GraceMs);
     };
 
     const onProperties = (changes) => {
       for (const change of changes || []) {
         const siid = Number(change?.siid);
         const piid = Number(change?.piid);
-
-        if (siid !== 4 || piid !== 23) {
-          continue;
-        }
 
         if (
           change?.value === null ||
@@ -1606,131 +1133,221 @@ async function waitForVacuumOnlyActualMode(
           continue;
         }
 
-        const packed = Number(change.value);
-        if (!Number.isFinite(packed)) continue;
-
-        const mode = packed & 0x3;
-        lastCleanMode = mode;
-
-        if (cleanModes[cleanModes.length - 1] !== mode) {
-          cleanModes.push(mode);
-          console.log(
-            `VACUUM-ONLY START VERIFY cleanMode=${mode} packed=${packed}`
-          );
+        if (siid === 2 && piid === 1) {
+          rememberState(change.value);
+          continue;
         }
 
-        if (mode === 2) {
-          done({
-            kind: "wrong-mode",
-            reason: "clean-mode-switched-to-sweep-and-mop",
-            miotState: lastMiotState,
-            cleanMode: mode,
-          });
+        if (siid === 4 && piid === 1) {
+          const n = Number(change.value);
+          if (Number.isFinite(n)) {
+            observed.taskStatus = n;
+            console.log(
+              `NATIVE VACUUM VERIFY TaskStatus=${n}`
+            );
+          }
+          continue;
+        }
+
+        if (siid === 4 && piid === 23) {
+          const packed = Number(change.value);
+
+          if (Number.isFinite(packed)) {
+            const mode = packed & 0x3;
+            observed.cleanMode = mode;
+
+            if (
+              cleanModeSequence[
+                cleanModeSequence.length - 1
+              ] !== mode
+            ) {
+              cleanModeSequence.push(mode);
+              console.log(
+                `NATIVE VACUUM VERIFY CleanMode=${mode} packed=${packed}`
+              );
+            }
+          }
+          continue;
+        }
+
+        if (siid === 4 && piid === 50) {
+          const value =
+            parseSmartHostFromFeatureValue(
+              change.value
+            );
+
+          if (
+            value !== null &&
+            Number.isFinite(value)
+          ) {
+            observed.smartHost = value;
+            console.log(
+              `NATIVE VACUUM VERIFY SmartHost=${value}`
+            );
+          }
+          continue;
+        }
+
+        if (siid === 4 && piid === 53) {
+          const n = Number(change.value);
+
+          if (Number.isFinite(n)) {
+            observed.mopPadInstalled = n;
+            console.log(
+              `NATIVE VACUUM VERIFY MopPadInstalled=${n}`
+            );
+          }
         }
       }
     };
 
-    const onChange = (state) => {
-      if (
-        state?.miotStateRaw === null ||
-        state?.miotStateRaw === undefined ||
-        state?.miotStateRaw === ""
-      ) {
-        return;
-      }
+    const cleanup = () => {
+      clearInterval(timer);
+      vacuum.off(
+        "change",
+        onVacuumChange
+      );
+      rawSub.off(
+        "properties",
+        onProperties
+      );
+    };
 
-      const value = Number(state.miotStateRaw);
-      if (!Number.isFinite(value)) return;
+    const done = (result) => {
+      if (settled) return;
+      settled = true;
+      cleanup();
 
-      lastMiotState = value;
+      resolve({
+        ...result,
+        observed: {
+          ...observed,
+          stateSequence:
+            [...stateSequence],
+          cleanModeSequence:
+            [...cleanModeSequence],
+        },
+      });
+    };
 
-      if (seen[seen.length - 1] !== value) {
-        seen.push(value);
-        console.log(
-          `VACUUM-ONLY START VERIFY MiotState=${value}`
-        );
-      }
+    const timer = setInterval(() => {
+      if (settled) return;
 
-      if (value === 17) {
+      const state =
+        observed.miotState;
+
+      // These are strong signs that the device did NOT enter the
+      // native vacuum-only path that we captured and replay-tested.
+      if (observed.cleanMode === 2) {
         done({
           kind: "wrong-mode",
-          reason: "robot-requested-mop-install",
-          miotState: value,
+          reason:
+            "clean-mode-switched-to-sweep-and-mop",
         });
         return;
       }
 
-      if (value === 18) {
-        sawRemoveMop = true;
-        clearState12Timer();
-        clearState1Timer();
-
-        console.log(
-          "VACUUM-ONLY START VERIFY: ReturnRemoveMop observed; " +
-          "waiting for stable MiotState=1."
-        );
+      if (
+        observed.mopPadInstalled === 1
+      ) {
+        done({
+          kind: "wrong-mode",
+          reason:
+            "mop-pad-installed",
+        });
         return;
       }
 
-      if (value === 1) {
-        clearState12Timer();
+      if (state === 17) {
+        done({
+          kind: "wrong-mode",
+          reason:
+            "robot-requested-mop-install",
+        });
+        return;
+      }
 
-        if (!state1Timer) {
+      // A very short state=12 transition is tolerated because the
+      // device can have internal transition states. If it persists,
+      // this is not the proven native vacuum-only path.
+      if (state === 12) {
+        state1Since = null;
+
+        if (state12Since === null) {
+          state12Since = Date.now();
+
           console.log(
-            `VACUUM-ONLY START VERIFY: MiotState=1; ` +
-            `requiring ${stableVacuumMs}ms stability`
+            "NATIVE VACUUM VERIFY MiotState=12; " +
+            `allowing ${state12GraceMs}ms transition grace.`
           );
+        }
 
-          state1Timer = setTimeout(() => {
-            const raw = vacuum.state?.miotStateRaw;
-            const current =
-              raw === null ||
-              raw === undefined ||
-              raw === ""
-                ? null
-                : Number(raw);
-
-            if (current === 1) {
-              done({
-                kind: "verified",
-                miotState: 1,
-                stableMs: stableVacuumMs,
-              });
-            } else {
-              console.log(
-                "VACUUM-ONLY START VERIFY: state 1 was transient; " +
-                `current=${current ?? "unknown"}`
-              );
-              state1Timer = null;
-            }
-          }, stableVacuumMs);
+        if (
+          Date.now() - state12Since >=
+          state12GraceMs
+        ) {
+          done({
+            kind: "wrong-mode",
+            reason:
+              "persistent-vacuum-and-mop-state",
+          });
         }
 
         return;
       }
 
-      clearState1Timer();
+      state12Since = null;
 
-      if (value === 12) {
-        maybeStartState12Grace();
+      // This is the exact state observed in the native Dreamehome
+      // vacuum-only capture and verified successfully by v20 replay.
+      if (state === 1) {
+        if (state1Since === null) {
+          state1Since = Date.now();
+
+          console.log(
+            "NATIVE VACUUM VERIFY MiotState=1; " +
+            `requiring ${stableVacuumMs}ms stability.`
+          );
+        }
+
+        if (
+          Date.now() - state1Since >=
+          stableVacuumMs
+        ) {
+          done({
+            kind: "verified",
+            reason:
+              "stable-native-vacuum-state",
+            stableMs:
+              stableVacuumMs,
+          });
+        }
+
         return;
       }
 
-      clearState12Timer();
-    };
+      state1Since = null;
 
-    const overallTimer = setTimeout(
-      () =>
+      if (
+        Date.now() - startedAt >=
+        timeoutMs
+      ) {
         done({
           kind: "timeout",
-          reason: "vacuum-only-runtime-not-confirmed",
-          miotState: vacuum.state?.miotStateRaw ?? null,
-        }),
-      timeoutMs
-    );
+          reason:
+            "native-vacuum-state-not-observed",
+        });
+      }
+    }, 250);
 
-    rawSub.on("properties", onProperties);
-    vacuum.on("change", onChange);
+    rawSub.on(
+      "properties",
+      onProperties
+    );
+    vacuum.on(
+      "change",
+      onVacuumChange
+    );
   });
 }
 
@@ -1792,20 +1409,25 @@ async function applyPhaseConfigurationBestEffort(phase) {
   }
 
   console.log(
-    "Applying vacuum-only configuration before start " +
-    "(physical mop removal must be confirmed)."
+    "Applying PROVEN native-profile vacuum-only configuration: " +
+    "CustomizedCleaning=0 + SmartHost=0 + CleanMode=0; " +
+    "NO AutoMountMop write."
   );
 
   await setCustomizedCleaning(false);
   await sleep(250);
 
-  const mopSafety =
-    await ensureVacuumOnlyMopsParked();
+  await writeSmartHostBestEffort(0);
+  await sleep(250);
 
-  console.log(
-    "Vacuum-only physical state ready: " +
-    JSON.stringify(mopSafety)
-  );
+  // 0 = Sweeping / vacuum-only.
+  // This is the same configuration path that passed the v20 replay.
+  await setCleanMode(0);
+
+  // Native replay succeeded without touching AutoMountMop and without
+  // a pre-start mop-parking/dock-state gate. Runtime state is the
+  // authoritative safety check after START_CUSTOM.
+  await sleep(800);
 }
 
 async function verifyRuntimeConfiguration(
@@ -2010,7 +1632,8 @@ async function runPhase(phase, phaseIndex) {
     } catch (err) {
       if (
         err?.code === "VACUUM_ONLY_MOPS_NOT_PARKED" ||
-        err?.code === "VACUUM_ONLY_ROBOT_NOT_READY"
+        err?.code === "VACUUM_ONLY_ROBOT_NOT_READY" ||
+        err?.code === "VACUUM_ONLY_STATE_UNAVAILABLE"
       ) {
         const room = phase.rooms?.[0];
 
@@ -2093,16 +1716,18 @@ async function runPhase(phase, phaseIndex) {
       );
     } else {
       console.log(
-        `Starting vacuum-only candidate for room: ${ids.join(",")} ` +
+        `Starting PROVEN native-profile vacuum-only for room: ${ids.join(",")} ` +
         `fan=${phase.suction} repeats=${phase.repeats} ` +
-        "water=valid-current/default (NOT 0)"
+        "NO AutoMountMop write; water=current/default"
       );
 
+      // Arm the exact verifier that passed the v20 manual replay
+      // before START_CUSTOM so a fast MiotState=1 push cannot be missed.
       const actualModePromise =
-        waitForVacuumOnlyActualMode(
-          120000,
+        waitForNativeVacuumOnlyMode(
+          90000,
           8000,
-          25000
+          15000
         );
 
       const result = await vacuum.cleanSegments(ids, {
@@ -2127,8 +1752,8 @@ async function runPhase(phase, phaseIndex) {
         );
 
         console.log(
-          "Cancelling vacuum-only room because actual " +
-          "cleaning mode was not MiotState=1."
+          "Cancelling vacuum-only room because the robot did not " +
+          "match the proven native vacuum-only profile."
         );
 
         try {
