@@ -551,12 +551,91 @@ export class PresenceState {
       const completed = event === "plan-completed";
       const aborted = event === "plan-aborted";
       const fallback = event === "plan-fallback";
+      const phaseStarted = event === "plan-phase-started";
+      const phaseCompleted = event === "plan-phase-completed";
 
-      // maxRunsPerDay is intentionally interpreted as the maximum number
-      // of full-plan ATTEMPTS in the current away/presence cycle.
-      // A successful full plan closes the cycle immediately, even if
-      // attempts remain. An aborted plan may retry automatically until
-      // the configured attempt limit is reached.
+      const phaseIndex = Number(details.phaseIndex);
+      const phaseIndexValid =
+        Number.isInteger(phaseIndex) && phaseIndex >= 0;
+      const eventRoomId = Number(
+        Array.isArray(details.roomIds)
+          ? details.roomIds[0]
+          : details.roomId
+      );
+      const roomIdValid =
+        Number.isInteger(eventRoomId) && eventRoomId > 0;
+      const activePlan = Array.isArray(runInfo.roomPlan)
+        ? runInfo.roomPlan
+        : [];
+      const eventRoom = roomIdValid
+        ? activePlan.find(
+            (room) => Number(room?.id) === eventRoomId
+          )
+        : null;
+      const nextRoom =
+        phaseCompleted && phaseIndexValid
+          ? activePlan[phaseIndex + 1] || null
+          : null;
+
+      const completedRoomIds = new Set(
+        Array.isArray(runInfo.completedRoomIds)
+          ? runInfo.completedRoomIds
+              .map(Number)
+              .filter(
+                (id) => Number.isInteger(id) && id > 0
+              )
+          : []
+      );
+      if (phaseCompleted && roomIdValid) {
+        completedRoomIds.add(eventRoomId);
+      }
+
+      let resumeCursorRoomId =
+        runInfo.resumeCursorRoomId ?? null;
+      let resumeCursorRoomName =
+        runInfo.resumeCursorRoomName ?? null;
+      let currentRoomId = runInfo.currentRoomId ?? null;
+      let currentRoomName = runInfo.currentRoomName ?? null;
+      let resumeRoomId = runInfo.resumeRoomId ?? null;
+      let resumeRoomName = runInfo.resumeRoomName ?? null;
+
+      if (phaseStarted && roomIdValid) {
+        currentRoomId = eventRoomId;
+        currentRoomName =
+          eventRoom?.name ||
+          details.roomName ||
+          details.label ||
+          `חדר ${eventRoomId}`;
+        resumeCursorRoomId = eventRoomId;
+        resumeCursorRoomName = currentRoomName;
+
+        if (runInfo.resumePending) {
+          resumeRoomId = eventRoomId;
+          resumeRoomName = currentRoomName;
+        }
+      }
+
+      if (phaseCompleted) {
+        currentRoomId = null;
+        currentRoomName = null;
+        resumeCursorRoomId = nextRoom?.id ?? null;
+        resumeCursorRoomName = nextRoom?.name ?? null;
+
+        if (runInfo.resumePending) {
+          resumeRoomId = nextRoom?.id ?? null;
+          resumeRoomName = nextRoom?.name ?? null;
+        }
+      }
+
+      if (completed) {
+        currentRoomId = null;
+        currentRoomName = null;
+        resumeCursorRoomId = null;
+        resumeCursorRoomName = null;
+        resumeRoomId = null;
+        resumeRoomName = null;
+      }
+
       const maxAttempts = Math.max(
         1,
         Number(this.effectiveConfig().maxRunsPerDay || 1)
@@ -588,8 +667,6 @@ export class PresenceState {
           aborted
             ? new Date().toISOString()
             : runInfo.abortedAt,
-        // Backward-compatible field: now means the current presence
-        // cycle is closed, not merely that an abort occurred.
         automaticRetryBlocked:
           closePresenceCycle
             ? true
@@ -628,6 +705,22 @@ export class PresenceState {
               : Boolean(runInfo.planCompletedInCycle),
         maxAttemptsForCycle: maxAttempts,
         attemptsUsedInCycle: attemptsUsed,
+        currentRoomId,
+        currentRoomName,
+        resumeCursorRoomId,
+        resumeCursorRoomName,
+        resumePending:
+          completed ? false : Boolean(runInfo.resumePending),
+        resumeRoomId,
+        resumeRoomName,
+        completedRoomIds:
+          completed ? [] : [...completedRoomIds],
+        originalRoomPlan:
+          completed ? null : runInfo.originalRoomPlan,
+        resumeCompletedAt:
+          completed && runInfo.resumePending
+            ? new Date().toISOString()
+            : runInfo.resumeCompletedAt,
         planProgress: {
           event,
           details,
@@ -636,7 +729,15 @@ export class PresenceState {
       };
 
       await this.ctx.storage.put("runInfo", updated);
-      await this.appendEvent(event, details);
+      await this.appendEvent(event, {
+        ...details,
+        currentRoomId,
+        currentRoomName,
+        resumePending: updated.resumePending,
+        resumeRoomId: updated.resumeRoomId,
+        resumeRoomName: updated.resumeRoomName,
+        completedRoomIds: updated.completedRoomIds,
+      });
       return Response.json({ ok: true, event });
     }
 
@@ -970,6 +1071,101 @@ export class PresenceState {
     };
   }
 
+  normalizeRunInfoForToday(runInfo, now) {
+    // Resume is intentionally valid ONLY for the same local calendar day.
+    // When the date changes, discard the previous day's cursor/progress and
+    // let resolveDayPlan() choose the new day's configured cleaning plan.
+    if (runInfo?.date === now.date) {
+      return runInfo;
+    }
+
+    return {
+      date: now.date,
+      count: 0,
+      active: false,
+      actualRun: false,
+      fallbackUsed: false,
+      automaticRetryBlocked: false,
+      retryBlockedAt: null,
+      retryBlockReason: null,
+      cycleClosed: false,
+      cycleCloseReason: null,
+      planCompletedInCycle: false,
+      presenceResetArmed: false,
+      resumePending: false,
+      resumeRoomId: null,
+      resumeRoomName: null,
+      resumeCursorRoomId: null,
+      resumeCursorRoomName: null,
+      currentRoomId: null,
+      currentRoomName: null,
+      completedRoomIds: [],
+      originalRoomPlan: null,
+      roomPlan: [],
+      dateResetAt: new Date().toISOString(),
+    };
+  }
+
+  resolveResumeRoomPlan(defaultRoomPlan, runInfo) {
+    const fallbackPlan = Array.isArray(defaultRoomPlan)
+      ? defaultRoomPlan
+      : [];
+
+    const resumeRoomId = Number(runInfo?.resumeRoomId);
+    const hasResume =
+      Boolean(runInfo?.resumePending) &&
+      Number.isInteger(resumeRoomId) &&
+      resumeRoomId > 0;
+
+    if (!hasResume) {
+      return {
+        roomPlan: fallbackPlan,
+        originalRoomPlan: fallbackPlan,
+        resuming: false,
+        resumeRoomId: null,
+        resumeRoomName: null,
+      };
+    }
+
+    const savedPlan =
+      Array.isArray(runInfo?.originalRoomPlan) &&
+      runInfo.originalRoomPlan.length
+        ? runInfo.originalRoomPlan
+        : Array.isArray(runInfo?.roomPlan) &&
+            runInfo.roomPlan.length
+          ? runInfo.roomPlan
+          : fallbackPlan;
+
+    const resumeIndex = savedPlan.findIndex(
+      (room) => Number(room?.id) === resumeRoomId
+    );
+
+    if (resumeIndex < 0) {
+      return {
+        roomPlan: fallbackPlan,
+        originalRoomPlan: fallbackPlan,
+        resuming: false,
+        resumeRoomId: null,
+        resumeRoomName: null,
+        invalidResumeRoomId: resumeRoomId,
+      };
+    }
+
+    const roomPlan = savedPlan.slice(resumeIndex);
+    const resumeRoom = roomPlan[0] || null;
+
+    return {
+      roomPlan,
+      originalRoomPlan: savedPlan,
+      resuming: true,
+      resumeRoomId,
+      resumeRoomName:
+        resumeRoom?.name ||
+        runInfo?.resumeRoomName ||
+        `חדר ${resumeRoomId}`,
+    };
+  }
+
   async stopIfActive(returnedBy) {
     const runInfo = await this.ctx.storage.get("runInfo");
 
@@ -1032,20 +1228,55 @@ export class PresenceState {
       };
     }
 
+    const resumeRoomId = Number(
+      runInfo.resumeCursorRoomId || runInfo.currentRoomId
+    );
+    const resumeRoomValid =
+      Number.isInteger(resumeRoomId) && resumeRoomId > 0;
+    const savedPlan =
+      Array.isArray(runInfo.originalRoomPlan) &&
+      runInfo.originalRoomPlan.length
+        ? runInfo.originalRoomPlan
+        : Array.isArray(runInfo.roomPlan)
+          ? runInfo.roomPlan
+          : [];
+    const resumeRoom = resumeRoomValid
+      ? savedPlan.find(
+          (room) => Number(room?.id) === resumeRoomId
+        )
+      : null;
+    const resumeRoomName =
+      resumeRoom?.name ||
+      runInfo.resumeCursorRoomName ||
+      runInfo.currentRoomName ||
+      (resumeRoomValid ? `חדר ${resumeRoomId}` : null);
+    const interruptedAt = new Date().toISOString();
+
     await this.ctx.storage.put("runInfo", {
       ...runInfo,
       active: false,
-      stopRequestedAt: new Date().toISOString(),
+      stopRequestedAt: interruptedAt,
       stoppedBy: returnedBy,
+      resumePending: resumeRoomValid,
+      resumeRoomId: resumeRoomValid ? resumeRoomId : null,
+      resumeRoomName,
+      interruptedAt,
+      interruptedBy: returnedBy,
     });
 
     await this.appendEvent("return_home_stop", {
       returnedBy,
+      resumePending: resumeRoomValid,
+      resumeRoomId: resumeRoomValid ? resumeRoomId : null,
+      resumeRoomName,
     });
 
     return {
       action: "stop_and_dock_dispatched",
       returnedBy,
+      resumePending: resumeRoomValid,
+      resumeRoomId: resumeRoomValid ? resumeRoomId : null,
+      resumeRoomName,
       github,
     };
   }
@@ -1781,12 +2012,11 @@ export class PresenceState {
       now.weekday
     );
     const existing = await this.ctx.storage.get("runInfo");
-    const runInfo =
-      existing?.date === now.date
-        ? existing
-        : { date: now.date, count: 0 };
+    const runInfo = this.normalizeRunInfoForToday(existing, now);
+    const resume = this.resolveResumeRoomPlan(roomPlan, runInfo);
+    const effectiveRoomPlan = resume.roomPlan;
 
-    if (!roomPlan.length) {
+    if (!effectiveRoomPlan.length) {
       const result = {
         action: "no_plan_today",
         forced: true,
@@ -1816,7 +2046,11 @@ export class PresenceState {
       github = await this.dispatchGitHub(
         "smart-run",
         "",
-        { callbackToken, callbackUrl, roomPlan }
+        {
+          callbackToken,
+          callbackUrl,
+          roomPlan: effectiveRoomPlan,
+        }
       );
     } catch (err) {
       const result = {
@@ -1844,12 +2078,37 @@ export class PresenceState {
       presenceResetArmed: false,
       maxAttemptsForCycle: config.maxRunsPerDay,
       callbackToken,
-      roomPlan,
+      roomPlan: effectiveRoomPlan,
+      originalRoomPlan: resume.originalRoomPlan,
+      resumePending: resume.resuming,
+      resumeRoomId:
+        resume.resuming ? resume.resumeRoomId : null,
+      resumeRoomName:
+        resume.resuming ? resume.resumeRoomName : null,
+      resumeStartedAt:
+        resume.resuming ? new Date().toISOString() : null,
+      resumeCursorRoomId:
+        effectiveRoomPlan[0]?.id ?? null,
+      resumeCursorRoomName:
+        effectiveRoomPlan[0]?.name ?? null,
+      currentRoomId: null,
+      currentRoomName: null,
+      completedRoomIds:
+        resume.resuming &&
+        Array.isArray(runInfo.completedRoomIds)
+          ? runInfo.completedRoomIds
+          : [],
       forced: true,
     });
 
     await this.appendEvent("dashboard_run_now", {
       primaryMode: config.primaryMode,
+      resuming: resume.resuming,
+      resumeRoomId:
+        resume.resuming ? resume.resumeRoomId : null,
+      resumeRoomName:
+        resume.resuming ? resume.resumeRoomName : null,
+      planRooms: effectiveRoomPlan.map((room) => room.id),
     });
 
     return {
@@ -2547,9 +2806,15 @@ export class PresenceState {
     const inWindow = now.minuteOfDay >= start && now.minuteOfDay < end;
     const maxRuns = config.maxRunsPerDay;
 
-    const runInfo = state.runInfo?.date === now.date
-      ? state.runInfo
-      : { date: now.date, count: 0 };
+    const runInfo = this.normalizeRunInfoForToday(
+      state.runInfo,
+      now
+    );
+    const resume = this.resolveResumeRoomPlan(
+      roomPlan,
+      runInfo
+    );
+    const effectiveRoomPlan = resume.roomPlan;
 
     const result = {
       reason,
@@ -2568,8 +2833,13 @@ export class PresenceState {
       localTime: now,
       action: "none",
       primaryMode: config.primaryMode,
-      roomPlan,
-      planRooms: roomPlan.map((room) => room.id),
+      roomPlan: effectiveRoomPlan,
+      planRooms: effectiveRoomPlan.map((room) => room.id),
+      resumePending: resume.resuming,
+      resumeRoomId:
+        resume.resuming ? resume.resumeRoomId : null,
+      resumeRoomName:
+        resume.resuming ? resume.resumeRoomName : null,
     };
 
     // Never dispatch another scheduled smart-run while a plan is active.
@@ -2666,7 +2936,7 @@ export class PresenceState {
     }
 
     if (
-      roomPlan.length === 0 ||
+      effectiveRoomPlan.length === 0 ||
       !presenceSatisfied ||
       !inWindow
     ) {
@@ -2689,7 +2959,7 @@ export class PresenceState {
       github = await this.dispatchGitHub("smart-run", "", {
         callbackToken,
         callbackUrl: config.workerPublicUrl,
-        roomPlan,
+        roomPlan: effectiveRoomPlan,
       });
     } catch (err) {
       return this.saveDecision({
@@ -2715,7 +2985,26 @@ export class PresenceState {
       presenceResetArmed: false,
       maxAttemptsForCycle: maxRuns,
       callbackToken,
-      roomPlan,
+      roomPlan: effectiveRoomPlan,
+      originalRoomPlan: resume.originalRoomPlan,
+      resumePending: resume.resuming,
+      resumeRoomId:
+        resume.resuming ? resume.resumeRoomId : null,
+      resumeRoomName:
+        resume.resuming ? resume.resumeRoomName : null,
+      resumeStartedAt:
+        resume.resuming ? new Date().toISOString() : null,
+      resumeCursorRoomId:
+        effectiveRoomPlan[0]?.id ?? null,
+      resumeCursorRoomName:
+        effectiveRoomPlan[0]?.name ?? null,
+      currentRoomId: null,
+      currentRoomName: null,
+      completedRoomIds:
+        resume.resuming &&
+        Array.isArray(runInfo.completedRoomIds)
+          ? runInfo.completedRoomIds
+          : [],
       presenceMode,
       wifeOnlyDay,
     });
@@ -2726,6 +3015,12 @@ export class PresenceState {
       rooms: config.cleanGeniusRooms,
       presenceMode,
       wifeOnlyDay,
+      resuming: resume.resuming,
+      resumeRoomId:
+        resume.resuming ? resume.resumeRoomId : null,
+      resumeRoomName:
+        resume.resuming ? resume.resumeRoomName : null,
+      planRooms: effectiveRoomPlan.map((room) => room.id),
     });
 
     return this.saveDecision({
