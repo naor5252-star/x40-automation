@@ -272,6 +272,17 @@ export const dashboardHtml = String.raw`<!doctype html>
     .settings-state { min-height:22px; margin-top:10px; color:var(--muted); font-size:12px; }
     .settings-state.dirty { color:var(--amber); font-weight:750; }
 
+    .wife-only-days { grid-column:1/-1; border:1px solid var(--line); background:var(--surface-soft); border-radius:18px; padding:14px; }
+    .wife-only-days-head b { display:block; font-size:14px; }
+    .wife-only-days-head span { display:block; margin-top:4px; color:var(--muted); font-size:12px; line-height:1.5; }
+    .wife-days-grid { display:grid; grid-template-columns:repeat(7,minmax(0,1fr)); gap:7px; margin-top:11px; }
+    .wife-day { position:relative; min-width:0; }
+    .wife-day input { position:absolute; opacity:0; pointer-events:none; }
+    .wife-day span { min-height:42px; display:grid; place-items:center; border:1px solid var(--line); border-radius:12px; background:var(--surface); color:var(--muted); font-size:12px; font-weight:800; }
+    .wife-day input:checked + span { background:var(--brand-soft); color:var(--brand-dark); border-color:rgba(22,143,123,.35); }
+    .wife-only-summary { margin-top:10px; color:var(--muted); font-size:12px; line-height:1.5; }
+    @media (max-width:560px) { .wife-days-grid { grid-template-columns:repeat(4,minmax(0,1fr)); } }
+
     .presence-grid { display:grid; grid-template-columns:1fr 1fr; gap:10px; }
     .presence-card { padding:16px; }
     .presence-head { display:flex; align-items:center; justify-content:space-between; gap:10px; }
@@ -639,6 +650,23 @@ export const dashboardHtml = String.raw`<!doctype html>
             <div class="field"><label for="eveningCheckTime">בדיקת ערב</label><input id="eveningCheckTime" type="time"></div>
             <div class="field"><label for="waterCheckTime">בדיקת מים</label><input id="waterCheckTime" type="time"></div>
             <div class="switch-row"><span>Dry Run — ללא הפעלה בפועל</span><input id="dryRun" type="checkbox"></div>
+
+            <div class="wife-only-days">
+              <div class="wife-only-days-head">
+                <b>ימים שבהם מספיק שאשתי בחוץ</b>
+                <span>בימים המסומנים האוטומציה יכולה להתחיל כשאשתי מחוץ לבית מספיק זמן, גם אם אני בבית. בימים שלא מסומנים — שנינו חייבים להיות בחוץ.</span>
+              </div>
+              <div class="wife-days-grid" id="wifeOnlyDaysGrid">
+                <label class="wife-day"><input type="checkbox" class="wife-only-day" value="7"><span>א׳</span></label>
+                <label class="wife-day"><input type="checkbox" class="wife-only-day" value="1"><span>ב׳</span></label>
+                <label class="wife-day"><input type="checkbox" class="wife-only-day" value="2"><span>ג׳</span></label>
+                <label class="wife-day"><input type="checkbox" class="wife-only-day" value="3"><span>ד׳</span></label>
+                <label class="wife-day"><input type="checkbox" class="wife-only-day" value="4"><span>ה׳</span></label>
+                <label class="wife-day"><input type="checkbox" class="wife-only-day" value="5"><span>ו׳</span></label>
+                <label class="wife-day"><input type="checkbox" class="wife-only-day" value="6"><span>שבת</span></label>
+              </div>
+              <div class="wife-only-summary" id="wifeOnlyDaysSummary">—</div>
+            </div>
           </div>
         </article>
 
@@ -1078,6 +1106,46 @@ export const dashboardHtml = String.raw`<!doctype html>
     }).join(" • ") : "אין תוכנית ניקוי פעילה להיום";
   }
 
+  const wifeOnlyDayNames = {
+    1:"יום שני",2:"יום שלישי",3:"יום רביעי",4:"יום חמישי",5:"יום שישי",6:"שבת",7:"יום ראשון"
+  };
+
+  function normalizeWifeOnlyDays(value) {
+    if (!Array.isArray(value)) return [];
+    return [...new Set(value.map(Number).filter(function(day){
+      return Number.isInteger(day) && day >= 1 && day <= 7;
+    }))].sort(function(a,b){ return a-b; });
+  }
+
+  function renderWifeOnlyDaysSummary(days) {
+    const el = $("wifeOnlyDaysSummary");
+    if (!el) return;
+    const selected = normalizeWifeOnlyDays(days);
+    if (!selected.length) {
+      el.textContent = "לא נבחרו ימים — בכל הימים נדרש ששנינו נהיה מחוץ לבית.";
+      return;
+    }
+    const displayOrder=[7,1,2,3,4,5,6];
+    const names=displayOrder.filter(function(day){return selected.includes(day);})
+      .map(function(day){return wifeOnlyDayNames[day];});
+    el.textContent="רק נוכחות אשתי קובעת ב: " + names.join(", ") + ".";
+  }
+
+  function fillWifeOnlyDays(days) {
+    const selected = new Set(normalizeWifeOnlyDays(days));
+    document.querySelectorAll(".wife-only-day").forEach(function(input){
+      input.checked = selected.has(Number(input.value));
+    });
+    renderWifeOnlyDaysSummary([...selected]);
+  }
+
+  function readWifeOnlyDays() {
+    return [...document.querySelectorAll(".wife-only-day:checked")]
+      .map(function(input){return Number(input.value);})
+      .filter(function(day){return Number.isInteger(day) && day >= 1 && day <= 7;})
+      .sort(function(a,b){return a-b;});
+  }
+
   function fillSettings(s, force) {
     latestServerSettings = s || {};
     if (settingsDirty && !force) return;
@@ -1090,6 +1158,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     ];
     ids.forEach(function(id){ if ($(id) && s[id] !== undefined) $(id).value = s[id]; });
     $("dryRun").checked = Boolean(s.dryRun);
+    fillWifeOnlyDays(Array.isArray(s.wifeOnlyDays) ? s.wifeOnlyDays : []);
     roomProfilesDraft = deepClone(Array.isArray(s.roomProfiles) ? s.roomProfiles : []);
     weeklyPlanDraft = deepClone(s.weeklyPlan && typeof s.weeklyPlan === "object" ? s.weeklyPlan : {});
     renderRoomPlanEditor();
@@ -1309,6 +1378,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       startTime:val("startTime"),endTime:val("endTime"),
       awayDelayMinutes:Number(val("awayDelayMinutes")),maxRunsPerDay:Number(val("maxRunsPerDay")),
       activeRunMaxMinutes:Number(val("activeRunMaxMinutes")),dryRun:$("dryRun").checked,
+      wifeOnlyDays:readWifeOnlyDays(),
       eveningCheckTime:val("eveningCheckTime"),waterCheckTime:val("waterCheckTime"),timezone:val("timezone"),
       primaryMode:val("primaryMode"),shortcutName:val("shortcutName"),shortcutId:val("shortcutId"),
       cleanGeniusRooms:val("cleanGeniusRooms"),cleanGeniusMode:val("cleanGeniusMode"),cleanGeniusLabel:val("cleanGeniusLabel"),
@@ -1375,6 +1445,12 @@ export const dashboardHtml = String.raw`<!doctype html>
       if (event.target && event.target.matches("input,select,textarea")) markSettingsDirty();
     });
   });
+  document.querySelectorAll(".wife-only-day").forEach(function(input){
+    input.addEventListener("change",function(){
+      renderWifeOnlyDaysSummary(readWifeOnlyDays());
+    });
+  });
+
   window.addEventListener("beforeunload",function(event){
     if (!settingsDirty) return;
     event.preventDefault();
