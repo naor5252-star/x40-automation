@@ -178,7 +178,6 @@ jobs:
           DREAME_CLEAN_GENIUS_LABEL: ${{ inputs.clean_genius_label }}
 
           DREAME_ROOM_PLAN_JSON: ${{ inputs.room_plan_json }}
-          DREAME_PLAN_PHASE_TIMEOUT_MINUTES: ${{ vars.DREAME_PLAN_PHASE_TIMEOUT_MINUTES || '75' }}
 
           DREAME_FALLBACK_SHORTCUT_NAME: ${{ inputs.fallback_shortcut_name }}
           DREAME_FALLBACK_SHORTCUT_ID: ${{ inputs.fallback_shortcut_id }}

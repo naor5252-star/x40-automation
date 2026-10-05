@@ -23,11 +23,6 @@ const waterCodes = new Set(
     .filter(Number.isFinite)
 );
 
-const phaseTimeoutMinutes = Math.max(
-  10,
-  Math.min(120, Number(process.env.DREAME_PLAN_PHASE_TIMEOUT_MINUTES || "75"))
-);
-
 let roomPlan;
 try {
   roomPlan = JSON.parse(process.env.DREAME_ROOM_PLAN_JSON || "[]");
@@ -893,19 +888,16 @@ async function fallbackForWater(phaseIndex) {
 
 function waitForPhaseResult(phase, phaseIndex) {
   const armedAt = Date.now();
-  const timeoutMs = phaseTimeoutMinutes * 60 * 1000;
 
   let cancelExternal = () => {};
 
   const promise = new Promise((resolve) => {
     let settled = false;
     let startedSeen = false;
-    let timer = null;
 
     const done = (result) => {
       if (settled) return;
       settled = true;
-      if (timer) clearTimeout(timer);
       vacuum.off("taskLifecycle", onLifecycle);
       vacuum.off("change", onChange);
       resolve(result);
@@ -955,14 +947,6 @@ function waitForPhaseResult(phase, phaseIndex) {
         done({ kind: "water", errorCode });
       }
     };
-
-    timer = setTimeout(() => {
-      done({
-        kind: "timeout",
-        phaseIndex,
-        timeoutMinutes: phaseTimeoutMinutes,
-      });
-    }, timeoutMs);
 
     vacuum.on("taskLifecycle", onLifecycle);
     vacuum.on("change", onChange);
@@ -2003,7 +1987,7 @@ async function runPhase(phase, phaseIndex) {
 
     return outcome;
   } finally {
-    // Avoid a dangling 75-minute timeout when this phase exits early.
+    // Remove phase listeners if this phase exits early for another reason.
     waitPromise?.cancel?.("phase-finalized");
     monitor.close();
   }
