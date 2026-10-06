@@ -1,3 +1,4 @@
+import { buildPhases } from "./plan-steps.mjs";
 import { DreameClient } from "node-dreame";
 
 const email = process.env.DREAME_EMAIL;
@@ -62,75 +63,35 @@ async function sendTelegram(text) {
 }
 
 async function sendRunEvent(event, details = {}) {
-  if (!callbackUrl || !callbackToken) return;
-  try {
-    const response = await fetch(
-      callbackUrl.replace(/\/$/, "") + "/run-event",
-      {
-        method: "POST",
-        headers: {
-          "Content-Type": "application/json",
-          "X-Run-Callback-Token": callbackToken,
-        },
-        body: JSON.stringify({ event, details }),
-      }
-    );
-    if (!response.ok) {
-      console.log(
-        `Run callback ${event} HTTP ${response.status}: ` +
-        `${(await response.text()).slice(0, 200)}`
-      );
-    }
-  } catch (err) {
-    console.log(`Run callback ${event} failed: ${err?.message || err}`);
+  const required = ["plan-phase-started", "plan-phase-completed", "plan-completed"].includes(event);
+  if (!callbackUrl || !callbackToken) {
+    if (required) throw new Error("Missing progress callback configuration");
+    return;
   }
+  let failure;
+  for (let attempt = 0; attempt < 3; attempt += 1) {
+    try {
+      const response = await fetch(callbackUrl.replace(/\/$/, "") + "/run-event", {
+        method: "POST",
+        headers: { "Content-Type": "application/json", "X-Run-Callback-Token": callbackToken },
+        body: JSON.stringify({ event, details }),
+        signal: AbortSignal.timeout(15000),
+      });
+      if (response.ok) return;
+      failure = new Error(`Run callback ${event} HTTP ${response.status}`);
+      // A revoked run or invalid step must never start the next room.
+      if (response.status >= 400 && response.status < 500) break;
+    } catch (err) { failure = err; }
+    if (attempt < 2) await sleep(1000 * (attempt + 1));
+  }
+  if (required) throw failure;
+  console.log(`Run callback ${event} failed: ${failure?.message || failure}`);
 }
 
-// ONE ROOM = ONE PHASE / ONE ROBOT ACTION.
+// ONE STEP = ONE PHASE / ONE ROBOT ACTION.
 // Do not merge adjacent rooms even when they have identical settings.
 // This keeps each room fully isolated: its own mode setup, its own
 // segment command, its own lifecycle completion, then the next room.
-function buildPhases(plan) {
-  const phases = [];
-
-  for (const room of plan) {
-    const normalized = {
-      id: Number(room.id),
-      name: String(room.name || `חדר ${room.id}`),
-      mode:
-        String(room.mode).toLowerCase() === "vacuum"
-          ? "vacuum"
-          : "cleangenius",
-      geniusMode:
-        String(room.geniusMode) === "2" ? "2" : "1",
-      suction: Math.max(
-        0,
-        Math.min(3, Number(room.suction ?? 2))
-      ),
-      repeats: Math.max(
-        1,
-        Math.min(3, Number(room.repeats ?? 1))
-      ),
-    };
-
-    if (
-      !Number.isInteger(normalized.id) ||
-      normalized.id <= 0
-    ) {
-      continue;
-    }
-
-    phases.push({
-      mode: normalized.mode,
-      geniusMode: normalized.geniusMode,
-      suction: normalized.suction,
-      repeats: normalized.repeats,
-      rooms: [normalized],
-    });
-  }
-
-  return phases;
-}
 
 function phaseLabel(phase) {
   const names = phase.rooms.map((r) => r.name).join(", ");
@@ -1624,6 +1585,7 @@ async function runPhase(phase, phaseIndex) {
 
   await sendRunEvent("plan-phase-started", {
     phaseIndex,
+    stepId: phase.stepId,
     phaseNumber: phaseIndex + 1,
     phaseCount: phases.length,
     label,
@@ -1964,6 +1926,7 @@ async function runPhase(phase, phaseIndex) {
 
     await sendRunEvent("plan-phase-completed", {
       phaseIndex,
+      stepId: phase.stepId,
       phaseNumber: phaseIndex + 1,
       phaseCount: phases.length,
       label,

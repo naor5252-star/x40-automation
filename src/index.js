@@ -1,3 +1,4 @@
+import { resolveStepResume, initialStepProgress, applyStepEvent, interruptedStepState, upgradeLegacyRunInfo } from "./step-progress.js";
 import { dashboardHtml } from "./dashboard.js";
 import {
   buildDefaultRoomProfiles,
@@ -501,7 +502,7 @@ export class PresenceState {
     }
 
     const token = request.headers.get("X-Run-Callback-Token");
-    const runInfo = await this.ctx.storage.get("runInfo");
+    const runInfo = upgradeLegacyRunInfo(await this.ctx.storage.get("runInfo"));
 
     if (
       !token ||
@@ -511,6 +512,12 @@ export class PresenceState {
       return new Response("Unauthorized", { status: 401 });
     }
 
+    if (!runInfo.active && body?.event === "plan-completed" && runInfo.planCompletedInCycle && !runInfo.stopRequestedAt) {
+      return Response.json({ ok: true, duplicate: true });
+    }
+    if (runInfo.date !== this.localNow().date || runInfo.stopRequestedAt || !runInfo.active) {
+      return Response.json({ ok: false, error: "run_no_longer_active" }, { status: 409 });
+    }
     const event = String(body?.event || "");
 
     if (event === "fallback-used") {
@@ -543,6 +550,9 @@ export class PresenceState {
     }
 
     if (event.startsWith("plan-")) {
+      if (!["plan-started", "plan-phase-started", "plan-phase-completed", "plan-completed", "plan-aborted", "plan-fallback"].includes(event)) {
+        return new Response("Unknown plan event", { status: 400 });
+      }
       const details =
         body?.details && typeof body.details === "object"
           ? body.details
@@ -554,28 +564,15 @@ export class PresenceState {
       const phaseStarted = event === "plan-phase-started";
       const phaseCompleted = event === "plan-phase-completed";
 
-      const phaseIndex = Number(details.phaseIndex);
-      const phaseIndexValid =
-        Number.isInteger(phaseIndex) && phaseIndex >= 0;
-      const eventRoomId = Number(
-        Array.isArray(details.roomIds)
-          ? details.roomIds[0]
-          : details.roomId
-      );
-      const roomIdValid =
-        Number.isInteger(eventRoomId) && eventRoomId > 0;
-      const activePlan = Array.isArray(runInfo.roomPlan)
-        ? runInfo.roomPlan
-        : [];
-      const eventRoom = roomIdValid
-        ? activePlan.find(
-            (room) => Number(room?.id) === eventRoomId
-          )
-        : null;
-      const nextRoom =
-        phaseCompleted && phaseIndexValid
-          ? activePlan[phaseIndex + 1] || null
-          : null;
+      const tracked = applyStepEvent(runInfo, event, details);
+      if (tracked.ignored === "step_already_completed" && phaseCompleted) {
+        return Response.json({ ok: true, duplicate: true });
+      }
+      if (tracked.ignored) return Response.json({ ok: false, ignored: tracked.ignored }, { status: 409 });
+      const eventRoom = tracked.room || null;
+      const nextRoom = tracked.nextRoom || null;
+      const eventRoomId = Number(eventRoom?.id);
+      const roomIdValid = Boolean(eventRoom);
 
       const completedRoomIds = new Set(
         Array.isArray(runInfo.completedRoomIds)
@@ -653,6 +650,7 @@ export class PresenceState {
 
       const updated = {
         ...runInfo,
+        ...tracked.progress,
         active:
           completed || aborted
             ? false
@@ -710,7 +708,7 @@ export class PresenceState {
         resumeCursorRoomId,
         resumeCursorRoomName,
         resumePending:
-          completed ? false : Boolean(runInfo.resumePending),
+          completed ? false : Boolean(runInfo.resumePending && tracked.progress.resumeCursorStepId !== null),
         resumeRoomId,
         resumeRoomName,
         completedRoomIds:
@@ -972,7 +970,7 @@ export class PresenceState {
         const now = this.localNow();
 
         await this.ctx.storage.put("runInfo", {
-          ...latestRunInfo,
+          ...this.normalizeRunInfoForToday(latestRunInfo, now),
           date: now.date,
           count: 0,
           active: false,
@@ -1076,7 +1074,7 @@ export class PresenceState {
     // When the date changes, discard the previous day's cursor/progress and
     // let resolveDayPlan() choose the new day's configured cleaning plan.
     if (runInfo?.date === now.date) {
-      return runInfo;
+      return upgradeLegacyRunInfo(runInfo);
     }
 
     return {
@@ -1093,6 +1091,11 @@ export class PresenceState {
       planCompletedInCycle: false,
       presenceResetArmed: false,
       resumePending: false,
+      resumeStepId: null,
+      resumeCursorStepId: null,
+      currentStepId: null,
+      completedStepIds: [],
+      callbackToken: null,
       resumeRoomId: null,
       resumeRoomName: null,
       resumeCursorRoomId: null,
@@ -1107,67 +1110,11 @@ export class PresenceState {
   }
 
   resolveResumeRoomPlan(defaultRoomPlan, runInfo) {
-    const fallbackPlan = Array.isArray(defaultRoomPlan)
-      ? defaultRoomPlan
-      : [];
-
-    const resumeRoomId = Number(runInfo?.resumeRoomId);
-    const hasResume =
-      Boolean(runInfo?.resumePending) &&
-      Number.isInteger(resumeRoomId) &&
-      resumeRoomId > 0;
-
-    if (!hasResume) {
-      return {
-        roomPlan: fallbackPlan,
-        originalRoomPlan: fallbackPlan,
-        resuming: false,
-        resumeRoomId: null,
-        resumeRoomName: null,
-      };
-    }
-
-    const savedPlan =
-      Array.isArray(runInfo?.originalRoomPlan) &&
-      runInfo.originalRoomPlan.length
-        ? runInfo.originalRoomPlan
-        : Array.isArray(runInfo?.roomPlan) &&
-            runInfo.roomPlan.length
-          ? runInfo.roomPlan
-          : fallbackPlan;
-
-    const resumeIndex = savedPlan.findIndex(
-      (room) => Number(room?.id) === resumeRoomId
-    );
-
-    if (resumeIndex < 0) {
-      return {
-        roomPlan: fallbackPlan,
-        originalRoomPlan: fallbackPlan,
-        resuming: false,
-        resumeRoomId: null,
-        resumeRoomName: null,
-        invalidResumeRoomId: resumeRoomId,
-      };
-    }
-
-    const roomPlan = savedPlan.slice(resumeIndex);
-    const resumeRoom = roomPlan[0] || null;
-
-    return {
-      roomPlan,
-      originalRoomPlan: savedPlan,
-      resuming: true,
-      resumeRoomId,
-      resumeRoomName:
-        resumeRoom?.name ||
-        runInfo?.resumeRoomName ||
-        `חדר ${resumeRoomId}`,
-    };
+    return resolveStepResume(defaultRoomPlan, runInfo);
   }
 
   async stopIfActive(returnedBy) {
-    const runInfo = await this.ctx.storage.get("runInfo");
+    const runInfo = upgradeLegacyRunInfo(await this.ctx.storage.get("runInfo"));
 
     if (!runInfo?.active || !runInfo?.lastRunAt) {
       return {
@@ -1214,55 +1161,28 @@ export class PresenceState {
       };
     }
 
-    let github;
-    try {
-      github = await this.dispatchGitHub(
-        "stop-and-dock",
-        returnedBy
-      );
-    } catch (err) {
-      return {
-        action: "stop_dispatch_failed",
-        returnedBy,
-        error: err?.message || String(err),
-      };
-    }
-
-    const resumeRoomId = Number(
-      runInfo.resumeCursorRoomId || runInfo.currentRoomId
-    );
-    const resumeRoomValid =
-      Number.isInteger(resumeRoomId) && resumeRoomId > 0;
-    const savedPlan =
-      Array.isArray(runInfo.originalRoomPlan) &&
-      runInfo.originalRoomPlan.length
-        ? runInfo.originalRoomPlan
-        : Array.isArray(runInfo.roomPlan)
-          ? runInfo.roomPlan
-          : [];
-    const resumeRoom = resumeRoomValid
-      ? savedPlan.find(
-          (room) => Number(room?.id) === resumeRoomId
-        )
-      : null;
-    const resumeRoomName =
-      resumeRoom?.name ||
-      runInfo.resumeCursorRoomName ||
-      runInfo.currentRoomName ||
-      (resumeRoomValid ? `חדר ${resumeRoomId}` : null);
+    const resumeState = interruptedStepState(runInfo);
     const interruptedAt = new Date().toISOString();
-
     await this.ctx.storage.put("runInfo", {
       ...runInfo,
+      ...resumeState,
       active: false,
       stopRequestedAt: interruptedAt,
       stoppedBy: returnedBy,
-      resumePending: resumeRoomValid,
-      resumeRoomId: resumeRoomValid ? resumeRoomId : null,
-      resumeRoomName,
       interruptedAt,
       interruptedBy: returnedBy,
     });
+    let github;
+    try {
+      github = await this.dispatchGitHub("stop-and-dock", returnedBy);
+    } catch (err) {
+      // Restore callback acceptance if no stop command was dispatched.
+      await this.ctx.storage.put("runInfo", runInfo);
+      return { action: "stop_dispatch_failed", returnedBy, error: err?.message || String(err) };
+    }
+    const resumeRoomValid = resumeState.resumePending;
+    const resumeRoomId = resumeState.resumeRoomId;
+    const resumeRoomName = resumeState.resumeRoomName;
 
     await this.appendEvent("return_home_stop", {
       returnedBy,
@@ -2013,6 +1933,7 @@ export class PresenceState {
     );
     const existing = await this.ctx.storage.get("runInfo");
     const runInfo = this.normalizeRunInfoForToday(existing, now);
+    if (runInfo.active) return { action: "run_already_active", forced: true };
     const resume = this.resolveResumeRoomPlan(roomPlan, runInfo);
     const effectiveRoomPlan = resume.roomPlan;
 
@@ -2041,27 +1962,6 @@ export class PresenceState {
       crypto.randomUUID() + "-" + crypto.randomUUID();
     const callbackUrl = config.workerPublicUrl;
 
-    let github;
-    try {
-      github = await this.dispatchGitHub(
-        "smart-run",
-        "",
-        {
-          callbackToken,
-          callbackUrl,
-          roomPlan: effectiveRoomPlan,
-        }
-      );
-    } catch (err) {
-      const result = {
-        action: "github_dispatch_failed",
-        forced: true,
-        error: err?.message || String(err),
-      };
-      await this.appendEvent("dashboard_run_failed", result);
-      return result;
-    }
-
     await this.ctx.storage.put("runInfo", {
       date: now.date,
       count: Number(runInfo.count || 0) + 1,
@@ -2080,6 +1980,7 @@ export class PresenceState {
       callbackToken,
       roomPlan: effectiveRoomPlan,
       originalRoomPlan: resume.originalRoomPlan,
+      ...initialStepProgress(effectiveRoomPlan, runInfo, resume.resuming),
       resumePending: resume.resuming,
       resumeRoomId:
         resume.resuming ? resume.resumeRoomId : null,
@@ -2100,6 +2001,33 @@ export class PresenceState {
           : [],
       forced: true,
     });
+
+    let github;
+    try {
+      github = await this.dispatchGitHub(
+        "smart-run",
+        "",
+        {
+          callbackToken,
+          callbackUrl,
+          roomPlan: effectiveRoomPlan,
+        }
+      );
+    } catch (err) {
+      const latest = await this.ctx.storage.get("runInfo");
+      if (latest?.callbackToken === callbackToken && !latest.stopRequestedAt) {
+        await this.ctx.storage.put("runInfo", { ...runInfo, active: false, callbackToken: null });
+      }
+      const result = {
+        action: "github_dispatch_failed",
+        forced: true,
+        error: err?.message || String(err),
+      };
+      await this.appendEvent("dashboard_run_failed", result);
+      return result;
+    }
+
+
 
     await this.appendEvent("dashboard_run_now", {
       primaryMode: config.primaryMode,
@@ -2954,21 +2882,6 @@ export class PresenceState {
 
     const callbackToken = crypto.randomUUID() + "-" + crypto.randomUUID();
 
-    let github;
-    try {
-      github = await this.dispatchGitHub("smart-run", "", {
-        callbackToken,
-        callbackUrl: config.workerPublicUrl,
-        roomPlan: effectiveRoomPlan,
-      });
-    } catch (err) {
-      return this.saveDecision({
-        ...result,
-        action: "github_dispatch_failed",
-        error: err?.message || String(err),
-      });
-    }
-
     await this.ctx.storage.put("runInfo", {
       date: now.date,
       count: Number(runInfo.count || 0) + 1,
@@ -2987,6 +2900,7 @@ export class PresenceState {
       callbackToken,
       roomPlan: effectiveRoomPlan,
       originalRoomPlan: resume.originalRoomPlan,
+      ...initialStepProgress(effectiveRoomPlan, runInfo, resume.resuming),
       resumePending: resume.resuming,
       resumeRoomId:
         resume.resuming ? resume.resumeRoomId : null,
@@ -3008,6 +2922,27 @@ export class PresenceState {
       presenceMode,
       wifeOnlyDay,
     });
+
+    let github;
+    try {
+      github = await this.dispatchGitHub("smart-run", "", {
+        callbackToken,
+        callbackUrl: config.workerPublicUrl,
+        roomPlan: effectiveRoomPlan,
+      });
+    } catch (err) {
+      const latest = await this.ctx.storage.get("runInfo");
+      if (latest?.callbackToken === callbackToken && !latest.stopRequestedAt) {
+        await this.ctx.storage.put("runInfo", { ...runInfo, active: false, callbackToken: null });
+      }
+      return this.saveDecision({
+        ...result,
+        action: "github_dispatch_failed",
+        error: err?.message || String(err),
+      });
+    }
+
+
 
     await this.appendEvent("smart_run_dispatched", {
       reason,

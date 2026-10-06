@@ -447,6 +447,49 @@ export const dashboardHtml = String.raw`<!doctype html>
       .robot-orb { width:70px; height:70px; border-radius:24px; font-size:34px; }
       .top-actions .logout-label { display:none; }
     }
+    .sequence-days { display:grid;grid-template-columns:repeat(7,minmax(0,1fr));gap:5px;margin-bottom:18px; }
+    .sequence-day { border:1px solid var(--line);border-radius:12px;background:var(--surface-soft);color:var(--muted);min-height:44px;padding:3px;font-size:12px;font-weight:700; }
+    .sequence-day.selected { background:var(--brand);border-color:var(--brand);color:white; }
+    .sequence-heading { display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:14px; }
+    .sequence-heading h3 { font-size:17px;margin:0 0 5px; }
+    .sequence-heading p { color:var(--muted);font-size:13px;margin:0; }
+    .sequence-enabled { display:flex;align-items:center;gap:9px;font-size:13px;white-space:nowrap; }
+    .sequence-enabled input { width:22px;min-height:22px; }
+    .sequence-rows { display:grid;gap:10px; }
+    .sequence-row { display:flex;align-items:center;gap:3px;background:var(--surface);border:1px solid var(--line);border-radius:17px;padding:9px 7px;min-height:78px; }
+    .sequence-row.selected { border-color:var(--brand);background:#f1faf7; }
+    .step-main { flex:1;min-width:0;display:flex;align-items:center;gap:10px;padding:4px;border:0;background:transparent;text-align:right;color:var(--text); }
+    .step-number { flex:0 0 34px;height:34px;border-radius:50%;background:var(--surface-strong);display:grid;place-items:center;font-weight:800; }
+    .step-copy { min-width:0;display:grid;gap:5px; }
+    .step-copy b { font-size:16px; }
+    .step-copy span { color:var(--muted);font-size:12px;line-height:1.5; }
+    .step-icon { width:38px;height:44px;flex-shrink:0;border:0;border-radius:12px;background:transparent;color:var(--muted);font-size:24px;display:grid;place-items:center; }
+    .step-icon:focus-visible,.step-main:focus-visible { outline:2px solid var(--brand);outline-offset:2px; }
+    .step-handle { touch-action:none;cursor:grab;user-select:none;-webkit-user-select:none; }
+    .sequence-row.dragging { opacity:.55; }
+    .sequence-row.drop-target { box-shadow:0 -4px 0 var(--brand); }
+    .sequence-empty { padding:26px 16px;text-align:center;color:var(--muted);font-size:14px;line-height:1.8;border:1px dashed var(--line);border-radius:17px; }
+    .sequence-add { width:100%;border-color:var(--brand);color:var(--brand-dark);background:transparent;margin-top:14px; }
+    .sequence-copy { width:100%;color:var(--brand-dark);text-decoration:underline;margin-top:5px; }
+    .sequence-help { text-align:center; }
+    #weeklyPlanGrid { display:block; }
+    .sequence-save { position:sticky;bottom:calc(78px + env(safe-area-inset-bottom));z-index:45;background:rgba(255,255,255,.96);border:1px solid var(--line);border-radius:18px;padding:12px;display:flex;align-items:center;gap:12px;box-shadow:var(--shadow-small);margin-top:16px; }
+    .sequence-save .btn { flex:1; }
+    .sequence-save .settings-state { flex:1;margin:0;font-size:12px; }
+    .step-sheet { position:fixed;inset:auto 0 0;width:min(100%,540px);max-height:88vh;max-height:88dvh;margin:0 auto;padding:22px 20px calc(22px + env(safe-area-inset-bottom));border:0;border-radius:26px 26px 0 0;background:var(--surface);color:var(--text);overflow:auto;box-shadow:var(--shadow); }
+    .step-sheet::backdrop { background:rgba(20,33,28,.38); }
+    .sheet-head { display:flex;align-items:center;justify-content:space-between;gap:12px;margin-bottom:18px; }
+    .sheet-head h2 { margin:0;font-size:21px; }
+    .sheet-actions { display:flex;gap:7px;flex-wrap:wrap;border-top:1px solid var(--line);padding-top:16px;margin-top:20px; }
+    .sheet-actions .btn { font-size:12px;padding:9px 10px; }
+    .step-segments { display:flex;gap:4px;border:1px solid var(--line);border-radius:14px;padding:4px;background:var(--surface-soft); }
+    .step-segments button { flex:1;min-height:44px;border:0;border-radius:10px;background:transparent;color:var(--text);font-size:14px;font-weight:650; }
+    .step-segments button.selected { background:var(--brand);color:white; }
+    .sheet-apply { width:100%;margin-top:18px;min-height:50px; }
+    .room-defaults { margin-top:18px; }
+    .room-defaults summary { font-size:14px; }
+    @media(max-width:370px) { .sequence-day{font-size:10px;} .step-icon{width:31px;} .sequence-heading h3{font-size:15px;} .step-number{flex-basis:29px;height:29px;} }
+
   </style>
 </head>
 <body>
@@ -640,6 +683,32 @@ export const dashboardHtml = String.raw`<!doctype html>
 
       <section id="view-settings" class="view hidden">
         <article class="card settings-card">
+          <h2>תוכנית ניקוי</h2>
+          <div class="editor-divider"></div>
+          <div id="todayPlanSummary" class="today-plan-summary">טוען את התוכנית להיום…</div>
+          <div id="activeSequenceNote" class="note section hidden">התוכנית הפעילה ממשיכה עם ההגדרות שבהן התחילה. שינויים שתשמור יחולו על ההפעלה החדשה הבאה.</div>
+          <div id="weeklyPlanGrid" class="section"></div>
+          <details class="room-defaults"><summary>חדרים וברירות מחדל</summary>
+            <p class="note">הגדרות אלה משמשות להוספת שלב חדש. לכל שלב שכבר נוצר יש הגדרות משלו.</p>
+            <button class="btn" onclick="addRoomProfile()">＋ הוסף חדר</button>
+            <div id="roomProfileRows" class="room-profile-grid section"></div>
+          </details>
+          <details class="room-defaults"><summary>הגדרות הפעלה ותוכנית גיבוי</summary>
+          <div class="fields">
+            <div class="field"><label for="primaryMode">מצב ראשי</label><select id="primaryMode"><option value="cleangenius">CleanGenius</option><option value="shortcut">Shortcut</option></select></div>
+            <div class="field"><label for="cleanGeniusMode">עומק CleanGenius</label><select id="cleanGeniusMode"><option value="1">Routine</option><option value="2">Deep</option></select></div>
+            <div class="field"><label for="cleanGeniusRooms">Room IDs</label><input id="cleanGeniusRooms" type="text" placeholder="2,3,4,7,8"></div>
+            <div class="field"><label for="cleanGeniusLabel">שמות חדרים</label><input id="cleanGeniusLabel" type="text"></div>
+            <div class="field"><label for="shortcutName">שם Shortcut ראשי</label><input id="shortcutName" type="text"></div>
+            <div class="field"><label for="shortcutId">Shortcut ID ראשי</label><input id="shortcutId" type="text"></div>
+            <div class="field"><label for="fallbackShortcutName">Fallback Shortcut</label><input id="fallbackShortcutName" type="text"></div>
+            <div class="field"><label for="fallbackShortcutId">Fallback Shortcut ID</label><input id="fallbackShortcutId" type="text"></div>
+          </div>
+
+          </details>
+        </article>
+
+        <article class="card settings-card section">
           <h2>אוטומציה יומית</h2>
           <div class="fields">
             <div class="field"><label for="startTime">שעת התחלה</label><input id="startTime" type="time"></div>
@@ -670,40 +739,7 @@ export const dashboardHtml = String.raw`<!doctype html>
           </div>
         </article>
 
-        <article class="card settings-card section">
-          <h2>תוכנית ניקוי</h2>
-          <div class="fields">
-            <div class="field"><label for="primaryMode">מצב ראשי</label><select id="primaryMode"><option value="cleangenius">CleanGenius</option><option value="shortcut">Shortcut</option></select></div>
-            <div class="field"><label for="cleanGeniusMode">עומק CleanGenius</label><select id="cleanGeniusMode"><option value="1">Routine</option><option value="2">Deep</option></select></div>
-            <div class="field"><label for="cleanGeniusRooms">Room IDs</label><input id="cleanGeniusRooms" type="text" placeholder="2,3,4,7,8"></div>
-            <div class="field"><label for="cleanGeniusLabel">שמות חדרים</label><input id="cleanGeniusLabel" type="text"></div>
-            <div class="field"><label for="shortcutName">שם Shortcut ראשי</label><input id="shortcutName" type="text"></div>
-            <div class="field"><label for="shortcutId">Shortcut ID ראשי</label><input id="shortcutId" type="text"></div>
-            <div class="field"><label for="fallbackShortcutName">Fallback Shortcut</label><input id="fallbackShortcutName" type="text"></div>
-            <div class="field"><label for="fallbackShortcutId">Fallback Shortcut ID</label><input id="fallbackShortcutId" type="text"></div>
-          </div>
 
-          <div class="editor-divider"></div>
-          <div class="room-editor-head">
-            <div>
-              <h3>הגדרות ניקוי לכל חדר</h3>
-              <p>בחר סוג ניקוי, עוצמת שאיבה ומספר מעברים לכל חדר.</p>
-            </div>
-            <button class="btn" onclick="addRoomProfile()">＋ הוסף חדר</button>
-          </div>
-          <div id="todayPlanSummary" class="today-plan-summary">טוען את התוכנית להיום…</div>
-          <div id="roomProfileRows" class="room-profile-grid"></div>
-
-          <div class="editor-divider"></div>
-          <div class="room-editor-head">
-            <div>
-              <h3>סדר הניקוי לפי יום</h3>
-              <p>סמן את החדרים והזן מספר סדר. מספר נמוך ינוקה קודם.</p>
-            </div>
-          </div>
-          <div id="weeklyPlanGrid" class="week-grid"></div>
-          <div id="settingsState" class="settings-state">כל ההגדרות שמורות</div>
-        </article>
 
         <article class="card settings-card section">
           <details>
@@ -719,12 +755,13 @@ export const dashboardHtml = String.raw`<!doctype html>
             </div>
           </details>
           <div class="settings-actions">
-            <button class="btn brand" onclick="saveSettings()">שמור הגדרות</button>
+
             <button class="btn" onclick="resetSettings()">חזור לערכי Cloudflare</button>
             <button class="btn" onclick="waterCheck()">בדיקת מים עכשיו</button>
           </div>
           <p class="note">סיסמת Dreame, טוקני Telegram ו־GitHub וקוד הגישה אינם מוצגים בממשק.</p>
         </article>
+        <div class="sequence-save"><button id="savePlanButton" class="btn brand" onclick="saveSettings()">שמור תוכנית</button><div id="settingsState" class="settings-state" role="status" aria-live="polite">כל ההגדרות שמורות</div></div>
       </section>
     </main>
 
@@ -734,6 +771,20 @@ export const dashboardHtml = String.raw`<!doctype html>
       <button id="nav-settings" class="nav-btn" onclick="showTab('settings')"><span class="nav-icon">⚙</span><span>הגדרות</span></button>
     </nav>
   </div>
+
+  <dialog id="stepSheet" class="step-sheet" aria-labelledby="stepSheetTitle">
+    <div class="sheet-head"><h2 id="stepSheetTitle">עריכת שלב</h2><button type="button" class="step-icon" aria-label="סגור" onclick="closeStepSheet()">✕</button></div>
+    <div id="stepEditFields">
+      <div class="field"><label for="stepRoom">חדר</label><select id="stepRoom" onchange="changeStepRoom()"></select></div>
+      <div class="field section"><label for="stepMode">סוג ניקוי</label><input id="stepMode" type="hidden"><div class="step-segments" role="group" aria-label="סוג ניקוי"><button type="button" data-mode-choice="vacuum" onclick="chooseStepMode('vacuum')">שאיבה בלבד</button><button type="button" data-mode-choice="cleangenius" onclick="chooseStepMode('cleangenius')">CleanGenius</button></div></div>
+      <div id="stepDepthField" class="field section"><label for="stepDepth">עומק הניקוי</label><input id="stepDepth" type="hidden"><div class="step-segments" role="group" aria-label="עומק הניקוי"><button type="button" data-depth-choice="1" onclick="chooseStepDepth('1')">רגיל</button><button type="button" data-depth-choice="2" onclick="chooseStepDepth('2')">עמוק</button></div></div>
+      <div id="stepVacuumFields" class="fields section"><div class="field"><label for="stepSuction">עוצמת שאיבה</label><select id="stepSuction" onchange="editingStep.settingsTouched=true"><option value="0">שקטה</option><option value="1">רגילה</option><option value="2">חזקה</option><option value="3">מרבית</option></select></div><div class="field"><label for="stepRepeats">מספר מעברים</label><select id="stepRepeats" onchange="editingStep.settingsTouched=true"><option value="1">מעבר אחד</option><option value="2">2 מעברים</option><option value="3">3 מעברים</option></select></div></div>
+      <p class="note">ההגדרות נשמרות לשלב הזה בלבד.</p>
+      <div id="stepExistingActions" class="sheet-actions"><button type="button" class="btn" onclick="sheetStepAction('copy')">⧉ שכפל שלב</button><button type="button" id="stepUp" class="btn" onclick="sheetStepAction('up')">↑ העבר למעלה</button><button type="button" id="stepDown" class="btn" onclick="sheetStepAction('down')">↓ העבר למטה</button><button type="button" class="btn danger" onclick="deleteEditedStep()">מחק</button></div>
+      <button type="button" id="stepApply" class="btn brand sheet-apply" onclick="applyStepEditor()">עדכן שלב</button>
+    </div>
+    <div id="copyDayFields" class="hidden"><p class="note">בחר לאילו ימים להעתיק. התוכניות שלהם יוחלפו לאחר האישור.</p><div id="copyDayTargets" class="sequence-rows"></div><button type="button" class="btn brand sheet-apply" onclick="applyCopyDay()">העתק תוכנית</button></div>
+  </dialog>
 
   <div id="toast" class="toast" role="status" aria-live="polite"></div>
 
@@ -749,6 +800,7 @@ export const dashboardHtml = String.raw`<!doctype html>
   let roomProfilesDraft = [];
   let weeklyPlanDraft = {};
   let settingsDirty = false;
+  let settingsRevision = 0;
   let settingsLoaded = false;
   const apiCalls = [];
 
@@ -943,6 +995,7 @@ export const dashboardHtml = String.raw`<!doctype html>
   function markSettingsDirty() {
     if (!settingsLoaded) return;
     settingsDirty = true;
+    settingsRevision += 1;
     updateSettingsState();
   }
 
@@ -999,37 +1052,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       updateRoomModeFields(card);
     });
 
-    weekBox.innerHTML = "";
-    [7,1,2,3,4,5,6].forEach(function(day){
-      const key = String(day);
-      const plan = weeklyPlanDraft[key] || {
-        enabled:true,
-        rooms:roomProfilesDraft.map(function(room){ return Number(room.id); })
-      };
-      const selected = new Map();
-      (plan.rooms || []).forEach(function(id,index){ selected.set(Number(id),index + 1); });
-
-      const card = document.createElement("div");
-      card.className = "day-plan";
-      card.dataset.planDay = key;
-      card.innerHTML =
-        '<div class="day-plan-head"><b>' + PLAN_DAY_LABELS[day] + '</b>' +
-        '<label><input type="checkbox" data-day-enabled ' + (plan.enabled !== false ? "checked" : "") + '>יום פעיל</label></div>';
-
-      roomProfilesDraft.forEach(function(room){
-        const id = Number(room.id);
-        const item = document.createElement("div");
-        item.className = "day-room";
-        item.dataset.dayRoomId = String(id);
-        item.innerHTML =
-          '<input type="checkbox" data-day-room ' + (selected.has(id) ? "checked" : "") + '>' +
-          '<span>' + escapeHtml(room.name || ("חדר " + id)) + '</span>' +
-          '<input type="number" min="1" max="99" inputmode="numeric" data-day-order value="' +
-          escapeHtml(selected.get(id) || "") + '" placeholder="סדר">';
-        card.appendChild(item);
-      });
-      weekBox.appendChild(card);
-    });
+    renderStepSequence();
   }
 
   function collectRoomPlanSettings() {
@@ -1038,7 +1061,7 @@ export const dashboardHtml = String.raw`<!doctype html>
       profiles.push({
         id:Number(card.dataset.roomId),
         name:card.querySelector('[data-rp="name"]').value.trim(),
-        enabled:true,
+        enabled:roomProfilesDraft.find(function(r){return Number(r.id)===Number(card.dataset.roomId);})?.enabled !== false,
         mode:card.querySelector('[data-rp="mode"]').value,
         geniusMode:card.querySelector('[data-rp="geniusMode"]').value,
         suction:Number(card.querySelector('[data-rp="suction"]').value),
@@ -1046,26 +1069,8 @@ export const dashboardHtml = String.raw`<!doctype html>
       });
     });
 
-    const weekly = {};
-    document.querySelectorAll("#weeklyPlanGrid [data-plan-day]").forEach(function(card){
-      const rooms = [];
-      card.querySelectorAll("[data-day-room-id]").forEach(function(row){
-        if (!row.querySelector("[data-day-room]").checked) return;
-        rooms.push({
-          id:Number(row.dataset.dayRoomId),
-          order:Number(row.querySelector("[data-day-order]").value) || 999
-        });
-      });
-      rooms.sort(function(a,b){ return a.order - b.order || a.id - b.id; });
-      weekly[String(card.dataset.planDay)] = {
-        enabled:card.querySelector("[data-day-enabled]").checked,
-        rooms:rooms.map(function(item){ return item.id; })
-      };
-    });
-
     roomProfilesDraft = profiles;
-    weeklyPlanDraft = weekly;
-    return {roomProfiles:profiles,weeklyPlan:weekly};
+    return {roomProfiles:profiles,weeklyPlan:deepClone(weeklyPlanDraft)};
   }
 
   function addRoomProfile() {
@@ -1078,9 +1083,6 @@ export const dashboardHtml = String.raw`<!doctype html>
     const name = prompt("שם החדר:","חדר " + id);
     if (name === null) return;
     roomProfilesDraft.push({id:id,name:name.trim() || ("חדר " + id),enabled:true,mode:"cleangenius",geniusMode:"1",suction:2,repeats:1});
-    Object.keys(weeklyPlanDraft).forEach(function(key){
-      if (weeklyPlanDraft[key] && Array.isArray(weeklyPlanDraft[key].rooms)) weeklyPlanDraft[key].rooms.push(id);
-    });
     renderRoomPlanEditor();
     markSettingsDirty();
   }
@@ -1090,10 +1092,212 @@ export const dashboardHtml = String.raw`<!doctype html>
     collectRoomPlanSettings();
     roomProfilesDraft = roomProfilesDraft.filter(function(room){ return Number(room.id) !== Number(id); });
     Object.keys(weeklyPlanDraft).forEach(function(key){
-      weeklyPlanDraft[key].rooms = (weeklyPlanDraft[key].rooms || []).filter(function(roomId){ return Number(roomId) !== Number(id); });
+      weeklyPlanDraft[key].steps = (weeklyPlanDraft[key].steps || []).filter(function(step){ return Number(step.roomId) !== Number(id); });
     });
     renderRoomPlanEditor();
     markSettingsDirty();
+  }
+
+  let selectedPlanDay = 1;
+  const planWeekday = new Intl.DateTimeFormat('en-US',{timeZone:'Asia/Jerusalem',weekday:'short'}).format(new Date());
+  selectedPlanDay = {Mon:1,Tue:2,Wed:3,Thu:4,Fri:5,Sat:6,Sun:7}[planWeekday] || 1;
+  let editingStep = null;
+  let stepSheetFocus = null;
+  let settingsSaving = false;
+  const MAX_PLAN_STEPS = 60;
+
+  function newStepId() {
+    return 'step-' + (crypto.randomUUID ? crypto.randomUUID() : Date.now().toString(36) + '-' + Math.random().toString(36).slice(2));
+  }
+
+  function draftWeeklySteps(raw) {
+    const out = {};
+    [7,1,2,3,4,5,6].forEach(function(day){
+      const item = raw[String(day)] || {enabled:true,rooms:roomProfilesDraft.map(function(r){return r.id;})};
+      const values = Array.isArray(item.steps) ? item.steps : (item.rooms || []).map(function(roomId,index){
+        const r = roomProfilesDraft.find(function(room){return Number(room.id) === Number(roomId);});
+        return Object.assign({},r || {},{roomId:Number(roomId),stepId:'day-' + day + '-step-' + (index+1)});
+      });
+      out[String(day)] = {enabled:item.enabled !== false,steps:deepClone(values)};
+    });
+    return out;
+  }
+
+  function planForDay() { return weeklyPlanDraft[String(selectedPlanDay)] || {enabled:false,steps:[]}; }
+  function stepDetail(step) {
+    if (step.mode === 'vacuum') {
+      const names=['שקטה','רגילה','חזקה','מרבית'];
+      return 'שאיבה בלבד · עוצמה ' + names[Number(step.suction)] + ' · ' + (Number(step.repeats) === 1 ? 'מעבר אחד' : step.repeats + ' מעברים');
+    }
+    return 'CleanGenius · ' + (String(step.geniusMode) === '2' ? 'עמוק' : 'רגיל');
+  }
+  function profileForStep(step) { return roomProfilesDraft.find(function(r){return Number(r.id) === Number(step.roomId);}); }
+
+  function renderStepSequence() {
+    const plan=planForDay(), box=$('weeklyPlanGrid');
+    if (!box) return;
+    box.innerHTML = '<div class="sequence-days" role="group" aria-label="בחירת יום">' +
+      [7,1,2,3,4,5,6].map(function(day){return '<button type="button" class="sequence-day' + (selectedPlanDay===day?' selected':'') + '" aria-pressed="' + (selectedPlanDay===day) + '" onclick="selectPlanDay(' + day + ')">' + PLAN_DAY_LABELS[day] + '</button>';}).join('') + '</div>' +
+      '<div class="sequence-heading"><div><h3>סדר השלבים · ' + PLAN_DAY_LABELS[selectedPlanDay] + '</h3><p>' + plan.steps.length + ' שלבים · ' + new Set(plan.steps.map(function(s){return s.roomId;})).size + ' חדרים</p></div><label class="sequence-enabled">יום פעיל <input type="checkbox" ' + (plan.enabled?'checked':'') + ' onchange="setPlanDayEnabled(this.checked)"></label></div>' +
+      '<div id="sequenceRows" class="sequence-rows">' + plan.steps.map(function(step,index){
+        const room=profileForStep(step);
+        return '<article class="sequence-row' + (editingStep && editingStep.stepId===step.stepId?' selected':'') + '" data-step-id="' + escapeHtml(step.stepId) + '" data-step-index="' + index + '">' +
+          '<button type="button" class="step-main" onclick="openStepEditor(' + index + ')" aria-label="עריכת שלב ' + (index+1) + '"><span class="step-number">' + (index+1) + '</span><span class="step-copy"><b>' + escapeHtml(room ? room.name : 'חדר חסר') + '</b><span>' + escapeHtml(stepDetail(step)) + '</span></span></button>' +
+          '<button type="button" class="step-icon" aria-label="שכפל שלב ' + (index+1) + '" title="שכפל שלב" onclick="duplicateStep(' + index + ')">⧉</button>' +
+          '<button type="button" class="step-icon step-handle" aria-label="גרור שלב ' + (index+1) + ' לשינוי הסדר" title="גרור לשינוי הסדר">⠿</button></article>';
+      }).join('') + (plan.steps.length ? '' : '<div class="sequence-empty">אין שלבים ביום הזה.<br>הוסף שלב ובחר חדר והגדרות.</div>') + '</div>' +
+      '<button type="button" class="btn sequence-add" onclick="openStepEditor(-1)">＋ הוסף שלב</button><button type="button" class="btn ghost sequence-copy" onclick="openCopyDay()">העתק ליום אחר</button><p class="note sequence-help">אותו חדר יכול להופיע בכל מקום ברשימה. גרור לשינוי הסדר או השתמש בכפתורים בעריכת השלב.</p>';
+    bindStepDrag();
+  }
+
+  function selectPlanDay(day) {
+    collectRoomPlanSettings(); selectedPlanDay=day; renderStepSequence();
+  }
+  function setPlanDayEnabled(enabled) { planForDay().enabled=Boolean(enabled); markSettingsDirty(); }
+  function duplicateStep(index) {
+    collectRoomPlanSettings();
+    const plan=planForDay();
+    if (plan.steps.length>=MAX_PLAN_STEPS) return toast('ניתן להוסיף עד 60 שלבים ביום','bad');
+    const step=deepClone(plan.steps[index]); if(!step) return;
+    step.stepId=newStepId(); plan.steps.splice(index+1,0,step);
+    markSettingsDirty(); renderStepSequence(); toast('השלב שוכפל — אפשר לגרור לכל מקום');
+  }
+  function moveStep(index,delta) {
+    const plan=planForDay(), target=index+delta;
+    if(target<0 || target>=plan.steps.length) return;
+    plan.steps.splice(target,0,plan.steps.splice(index,1)[0]);
+    markSettingsDirty(); renderStepSequence();
+  }
+
+  function showStepSheet() {
+    stepSheetFocus=document.activeElement;
+    $('stepSheet').showModal();
+  }
+  function closeStepSheet() {
+    const closedStepId=editingStep && editingStep.stepId;
+    $('stepSheet').close(); editingStep=null; renderStepSequence();
+    if(stepSheetFocus && stepSheetFocus.isConnected) stepSheetFocus.focus();
+    else {
+      const row=[...document.querySelectorAll('[data-step-id]')].find(function(el){return el.dataset.stepId===closedStepId;});
+      const focus=row ? row.querySelector('.step-main') : document.querySelector('.sequence-add');
+      if(focus) focus.focus();
+    }
+  }
+  function openStepEditor(index) {
+    collectRoomPlanSettings();
+    if(!roomProfilesDraft.length) return toast('הוסף חדר ברשימת החדרים לפני יצירת שלב','bad');
+    const plan=planForDay();
+    if(index<0 && plan.steps.length>=MAX_PLAN_STEPS) return toast('ניתן להוסיף עד 60 שלבים ביום','bad');
+    const original=index>=0 ? plan.steps[index] : null;
+    editingStep={day:selectedPlanDay,stepId:original ? original.stepId : newStepId(),isNew:!original};
+    const r=original ? profileForStep(original) : roomProfilesDraft[0];
+    const step=original || Object.assign({},r,{roomId:r.id});
+    $('stepSheetTitle').textContent=original ? 'עריכת שלב ' + (index+1) : 'הוספת שלב';
+    $('stepRoom').innerHTML=roomProfilesDraft.map(function(room){return '<option value="' + room.id + '">' + escapeHtml(room.name) + '</option>';}).join('');
+    $('stepRoom').value=String(step.roomId);
+    $('stepMode').value=step.mode || 'cleangenius'; $('stepDepth').value=String(step.geniusMode || '1');
+    $('stepSuction').value=String(step.suction===undefined?2:step.suction); $('stepRepeats').value=String(step.repeats || 1);
+    $('stepExistingActions').classList.toggle('hidden',!original);
+    $('stepUp').disabled=index<=0; $('stepDown').disabled=index<0 || index>=plan.steps.length-1;
+    $('stepApply').textContent=original?'עדכן שלב':'הוסף שלב';
+    $('stepEditFields').classList.remove('hidden'); $('copyDayFields').classList.add('hidden');
+    updateStepMode(); syncStepChoices(); renderStepSequence(); showStepSheet();
+  }
+  function updateStepMode() {
+    const vacuum=$('stepMode').value==='vacuum';
+    $('stepVacuumFields').classList.toggle('hidden',!vacuum); $('stepDepthField').classList.toggle('hidden',vacuum);
+  }
+  function syncStepChoices() {
+    document.querySelectorAll('[data-mode-choice]').forEach(function(b){b.classList.toggle('selected',b.dataset.modeChoice===$('stepMode').value);b.setAttribute('aria-pressed',String(b.dataset.modeChoice===$('stepMode').value));});
+    document.querySelectorAll('[data-depth-choice]').forEach(function(b){b.classList.toggle('selected',b.dataset.depthChoice===$('stepDepth').value);b.setAttribute('aria-pressed',String(b.dataset.depthChoice===$('stepDepth').value));});
+  }
+  function chooseStepMode(mode) { $('stepMode').value=mode;editingStep.settingsTouched=true;updateStepMode();syncStepChoices(); }
+  function chooseStepDepth(depth) { $('stepDepth').value=depth;editingStep.settingsTouched=true;syncStepChoices(); }
+  function changeStepRoom() {
+    if(!editingStep.isNew || editingStep.settingsTouched) return;
+    const room=roomProfilesDraft.find(function(r){return Number(r.id)===Number($('stepRoom').value);});
+    if(!room) return;
+    $('stepMode').value=room.mode;$('stepDepth').value=String(room.geniusMode || '1');
+    $('stepSuction').value=String(room.suction===undefined?2:room.suction);$('stepRepeats').value=String(room.repeats || 1);
+    updateStepMode();syncStepChoices();
+  }
+  function applyStepEditor() {
+    if(!editingStep || editingStep.copyDay) return;
+    const plan=weeklyPlanDraft[String(editingStep.day)];
+    const step={stepId:editingStep.stepId,roomId:Number($('stepRoom').value),mode:$('stepMode').value,
+      geniusMode:$('stepDepth').value,suction:Number($('stepSuction').value),repeats:Number($('stepRepeats').value)};
+    const index=plan.steps.findIndex(function(s){return s.stepId===step.stepId;});
+    if(editingStep.isNew) plan.steps.push(step); else if(index>=0) plan.steps[index]=step;
+    markSettingsDirty(); closeStepSheet();
+  }
+  function sheetStepAction(action) {
+    if(!editingStep) return;
+    // Save edits before moving or duplicating, so visible settings are retained.
+    const id=editingStep.stepId;
+    applyStepEditor();
+    const index=planForDay().steps.findIndex(function(s){return s.stepId===id;});
+    if(index<0) return;
+    if(action==='copy') duplicateStep(index);
+    else if(action==='up' || action==='down') moveStep(index,action==='up'?-1:1);
+  }
+  function deleteEditedStep() {
+    if(!editingStep || !confirm('למחוק את השלב הזה מהתוכנית?')) return;
+    const plan=weeklyPlanDraft[String(editingStep.day)];
+    plan.steps=plan.steps.filter(function(s){return s.stepId!==editingStep.stepId;});
+    markSettingsDirty(); closeStepSheet();
+  }
+  function openCopyDay() {
+    collectRoomPlanSettings(); editingStep={copyDay:true,day:selectedPlanDay};
+    $('stepSheetTitle').textContent='העתק את תוכנית יום ' + PLAN_DAY_LABELS[selectedPlanDay];
+    $('stepEditFields').classList.add('hidden'); $('copyDayFields').classList.remove('hidden');
+    $('copyDayTargets').innerHTML=[7,1,2,3,4,5,6].filter(function(day){return day!==selectedPlanDay;}).map(function(day){return '<label class="switch-row"><span>' + PLAN_DAY_LABELS[day] + '</span><input type="checkbox" value="' + day + '"></label>';}).join('');
+    showStepSheet();
+  }
+  function applyCopyDay() {
+    const targets=[...$('copyDayTargets').querySelectorAll('input:checked')].map(function(input){return input.value;});
+    if(!targets.length) return toast('בחר לפחות יום אחד','bad');
+    if(!confirm('התוכניות בימים שנבחרו יוחלפו. להמשיך?')) return;
+    const source=weeklyPlanDraft[String(editingStep.day)];
+    targets.forEach(function(day){weeklyPlanDraft[day]={enabled:source.enabled,steps:source.steps.map(function(s){return Object.assign({},deepClone(s),{stepId:newStepId()});})};});
+    markSettingsDirty(); closeStepSheet(); toast('התוכנית הועתקה');
+  }
+  function bindStepDrag() {
+    const box=$('sequenceRows'); let drag=null;
+    box.addEventListener('pointerdown',function(event){
+      const handle=event.target.closest('.step-handle');
+      if(!handle || event.button!==0) return;
+      const row=handle.closest('[data-step-index]');
+      drag={index:Number(row.dataset.stepIndex),startY:event.clientY,y:event.clientY,handle:handle,row:row,moved:false};
+      handle.setPointerCapture(event.pointerId);
+    });
+    box.addEventListener('pointermove',function(event){
+      if(!drag) return;
+      drag.y=event.clientY;
+      if(Math.abs(drag.y-drag.startY)<6 && !drag.moved) return;
+      drag.moved=true; drag.row.classList.add('dragging');
+      box.querySelectorAll('.drop-target').forEach(function(el){el.classList.remove('drop-target');});
+      const target=document.elementFromPoint(event.clientX,event.clientY)?.closest('[data-step-index]');
+      if(target && target!==drag.row) target.classList.add('drop-target');
+      if(event.clientY<110) window.scrollBy(0,-14);
+      if(event.clientY>window.innerHeight-150) window.scrollBy(0,14);
+      event.preventDefault();
+    });
+    function finish(event) {
+      if(!drag) return;
+      const old=drag; drag=null;
+      if(old.handle.hasPointerCapture(event.pointerId)) old.handle.releasePointerCapture(event.pointerId);
+      if(old.moved && event.type!=='pointercancel') {
+        const rows=[...box.querySelectorAll('[data-step-index]')];
+        let boundary=rows.findIndex(function(row){const r=row.getBoundingClientRect();return old.y<r.top+r.height/2;});
+        if(boundary<0) boundary=rows.length;
+        const target=boundary>old.index?boundary-1:boundary;
+        if(target!==old.index) {
+          const steps=planForDay().steps;steps.splice(target,0,steps.splice(old.index,1)[0]);markSettingsDirty();
+        }
+      }
+      renderStepSequence();
+    }
+    box.addEventListener('pointerup',finish);box.addEventListener('pointercancel',finish);
   }
 
   function renderTodayPlanSummary(todayPlan) {
@@ -1148,7 +1352,7 @@ export const dashboardHtml = String.raw`<!doctype html>
 
   function fillSettings(s, force) {
     latestServerSettings = s || {};
-    if (settingsDirty && !force) return;
+    if ((settingsDirty || editingStep || settingsSaving || document.querySelector(".sequence-row.dragging")) && !force) return;
     const ids = [
       "startTime","endTime","awayDelayMinutes","maxRunsPerDay","activeRunMaxMinutes",
       "eveningCheckTime","waterCheckTime","timezone","primaryMode","shortcutName","shortcutId",
@@ -1160,7 +1364,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     $("dryRun").checked = Boolean(s.dryRun);
     fillWifeOnlyDays(Array.isArray(s.wifeOnlyDays) ? s.wifeOnlyDays : []);
     roomProfilesDraft = deepClone(Array.isArray(s.roomProfiles) ? s.roomProfiles : []);
-    weeklyPlanDraft = deepClone(s.weeklyPlan && typeof s.weeklyPlan === "object" ? s.weeklyPlan : {});
+    weeklyPlanDraft = draftWeeklySteps(s.weeklyPlan && typeof s.weeklyPlan === "object" ? s.weeklyPlan : {});
     renderRoomPlanEditor();
     settingsLoaded = true;
     settingsDirty = false;
@@ -1271,7 +1475,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     if (todayPlan.length) {
       $("planName").textContent = "התוכנית להיום";
       $("planDescription").textContent = todayPlan.map(function(room){ return room.name; }).join(" ← ");
-      $("planModeChip").textContent = todayPlan.length + " חדרים";
+      $("planModeChip").textContent = todayPlan.length + " שלבים";
       $("roomsList").innerHTML = todayPlan.map(function(room,index){
         const detail = room.mode === "vacuum"
           ? "שאיבה " + suctionLabel(room.suction) + " ×" + room.repeats
@@ -1288,6 +1492,7 @@ export const dashboardHtml = String.raw`<!doctype html>
     $("awayDelayValue").textContent = safeText(config.awayDelayMinutes,"0") + " דקות";
     $("maxRunsValue").textContent = safeText(config.maxRunsPerDay,"—");
     renderTodayPlanSummary(todayPlan);
+    $("activeSequenceNote").classList.toggle("hidden", !Boolean(d.runInfo && (d.runInfo.active || d.runInfo.resumePending)));
 
     setPresenceUi("naor",d.naor);
     setPresenceUi("wife",d.wife);
@@ -1390,13 +1595,22 @@ export const dashboardHtml = String.raw`<!doctype html>
   }
 
   async function saveSettings() {
+    if (settingsSaving) return;
+    if (editingStep) return toast("סיים עריכת שלב לפני שמירת התוכנית", "bad");
+    settingsSaving = true;
+    const button = $("savePlanButton");
+    button.disabled = true; button.textContent = "שומר…";
     try {
-      await api("/api/settings",{method:"PUT",body:JSON.stringify(readSettings())});
-      settingsDirty = false;
+      const payload = readSettings();
+      const savingRevision = settingsRevision;
+      await api("/api/settings",{method:"PUT",body:JSON.stringify(payload)});
+      if (settingsRevision === savingRevision) settingsDirty = false;
       updateSettingsState();
-      toast("ההגדרות נשמרו");
-      await refresh(false);
+      toast(settingsDirty ? "התוכנית נשמרה; יש שינויים נוספים שלא נשמרו" : "התוכנית נשמרה");
+      const saved = await refresh(false);
+      if (!settingsDirty && !editingStep) fillSettings(saved.effectiveSettings || {}, true);
     } catch (err) { toast("השמירה נכשלה: " + err.message,"bad"); }
+    finally { settingsSaving = false; button.disabled = false; button.textContent = "שמור תוכנית"; }
   }
 
   async function resetSettings() {
@@ -1439,6 +1653,8 @@ export const dashboardHtml = String.raw`<!doctype html>
     catch (_) { toast("לא ניתן להעתיק אוטומטית","bad"); }
   }
 
+  $("stepSheet").addEventListener("cancel",function(event){event.preventDefault();closeStepSheet();});
+  $("stepSheet").addEventListener("click",function(event){if(event.target===$("stepSheet")){const r=event.target.getBoundingClientRect();if(event.clientX<r.left || event.clientX>r.right || event.clientY<r.top || event.clientY>r.bottom) closeStepSheet();}});
   $("tokenInput").addEventListener("keydown",function(event){ if (event.key === "Enter") login(); });
   ["input","change"].forEach(function(eventName){
     $("view-settings").addEventListener(eventName,function(event){
