@@ -423,6 +423,35 @@ export const dashboardHtml = String.raw`<!doctype html>
     }
     .toast.show { opacity:1; transform:translate(-50%,0); }
     .toast.bad { background:#8f2835; }
+    .progress-card { padding:20px; }
+    .progress-card .section-title { margin:0 0 16px; flex-wrap:wrap; gap:8px; }
+    .step-timeline { display:grid; gap:9px; }
+    .step-row { display:flex; align-items:center; gap:12px; padding:14px; border:1px solid var(--line); border-radius:18px; background:#fafcfb; }
+    .step-number { display:grid; place-items:center; flex:0 0 36px; height:36px; border-radius:50%; background:#eef2f0; font-weight:800; }
+    .step-copy { flex:1; min-width:0; }
+    .step-copy strong { display:block; font-size:16px; }
+    .step-copy small { display:block; color:var(--muted); margin-top:4px; line-height:1.5; }
+    .step-state { font-size:12px; font-weight:800; color:var(--muted); }
+    .step-row.done .step-state { color:var(--brand); }
+    .step-row.active { border-color:var(--brand); background:#edf8f4; }
+    .step-row.active .step-state { color:var(--brand); }
+    .step-row.uncertain { border-color:#edc77c; background:#fff7e9; }
+    .step-row.uncertain .step-state { color:#9d650c; }
+    .step-row.uncertain .step-number { background:#ffebc5; color:#9d650c; }
+    .progress-footer { margin-top:12px; padding:12px; background:#f0f4f2; border-radius:14px; color:var(--muted); font-size:13px; line-height:1.6; }
+    .step-detail { margin-top:10px; font-size:15px; font-weight:700; }
+    .progress-warning { background:#fff3dd; color:#94600e; padding:12px; border-radius:14px; margin-top:12px; line-height:1.6; font-size:13px; }
+    .hero.stale { border:1px solid #edc77c; background:#fffdfa; }
+    .hero .status-sub { margin-top:8px; }
+    .hero .robot-orb { color:var(--brand); border-radius:50%; background:linear-gradient(140deg,#fff,#e7ebea); border:2px solid #d0d7d3; box-shadow:inset 0 0 0 6px #f6f8f7,0 8px 16px #14211c18; }
+    .hero-actions { grid-column:1/-1; display:flex; gap:10px; width:100%; margin-top:10px; }
+    .hero-actions .btn { flex:1; min-height:48px; }
+    @media (max-width:420px) {
+      .progress-card { padding:16px; }
+      .step-row { padding:12px; gap:9px; }
+      .step-state { max-width:72px; }
+      .step-copy strong { font-size:14px; }
+    }
 
     @media (max-width:720px) {
       .shell { padding-left:10px; padding-right:10px; }
@@ -525,18 +554,31 @@ export const dashboardHtml = String.raw`<!doctype html>
 
     <main>
       <section id="view-home" class="view">
-        <article class="card hero">
+        <article id="progressHero" class="card hero" aria-live="polite">
           <div class="hero-copy">
             <span id="runChip" class="chip ok"><i class="dot"></i> מוכן</span>
             <h2 id="heroTitle">מוכן לניקוי</h2>
             <p id="heroSub">טוען את מצב הרובוט והתוכנית…</p>
+            <div id="activeStepDetail" class="step-detail"></div>
+            <div id="progressWarning" class="progress-warning hidden"></div>
+            <div id="reportAge" class="status-sub"></div>
+            <div id="stepElapsed" class="status-sub"></div>
           </div>
           <div class="robot-orb" aria-hidden="true">◉</div>
+          <div class="hero-actions">
+            <button class="btn brand" onclick="refresh(true)">↻ רענן מצב</button>
+            <button class="btn danger" onclick="stopDock()">■ עצור וחזור לתחנה</button>
+          </div>
+        </article>
+
+        <article class="card progress-card section">
+          <div class="section-title"><h2>התקדמות התוכנית</h2><span id="completedCount">—</span></div>
+          <div id="stepTimeline" class="step-timeline"></div>
+          <div id="progressFooter" class="progress-footer"></div>
         </article>
 
         <div class="action-grid section">
-          <button class="primary-action" onclick="runNow()">▶ התחל ניקוי</button>
-          <button class="btn danger" onclick="stopDock()">■ עצור וחזור</button>
+          <button id="startCleaningBtn" class="primary-action" onclick="runNow()">▶ התחל ניקוי</button>
           <button id="skipBtn" class="btn warn" onclick="toggleSkip()">דלג היום</button>
           <button class="btn soft" onclick="manualCheck()">בדוק תנאים</button>
         </div>
@@ -918,18 +960,93 @@ export const dashboardHtml = String.raw`<!doctype html>
     $(prefix + "Away").className = state === "away" ? "active-away" : "";
   }
 
+  function cleaningProgress(d, now) {
+    now = now === undefined ? Date.now() : now;
+    const raw = d.runInfo || {};
+    const run = raw.date === (d.localTime && d.localTime.date) ? raw : {};
+    const saved = Array.isArray(run.originalRoomPlan) && run.originalRoomPlan.length
+      ? run.originalRoomPlan : Array.isArray(run.roomPlan) && run.roomPlan.length ? run.roomPlan : null;
+    const plan = saved || ((d.config || {}).todayPlan || []);
+    const completed = Boolean(run.planCompletedInCycle || (run.planProgress || {}).event === "plan-completed");
+    const ids = new Set(Array.isArray(run.completedStepIds) ? run.completedStepIds : []);
+    const details = (run.planProgress || {}).details || {};
+    let index = plan.findIndex(function(step){ return step.stepId && step.stepId === run.currentStepId; });
+    // Resolve old indexes against the run snapshot, never by room ID.
+    if (index < 0 && (run.planProgress || {}).event === "plan-phase-started" && Number.isInteger(details.phaseIndex)) {
+      const step = (run.roomPlan || plan)[details.phaseIndex];
+      index = step && step.stepId ? plan.findIndex(function(s){return s.stepId === step.stepId;}) : saved ? details.phaseIndex : -1;
+    }
+    const current = index >= 0 ? plan[index] : null;
+    const reportAt = (run.planProgress || {}).at || run.actualRunAt || run.lastRunAt;
+    const reportMs = Date.parse(reportAt || "");
+    const age = Number.isFinite(reportMs) && reportMs <= now + 60000 ? Math.max(0, now - reportMs) : null;
+    const stale = Boolean(run.active && (age === null || age > 10 * 60000));
+    const done = plan.filter(function(step){return completed || (step.stepId && ids.has(step.stepId));}).length;
+    return {run:run,plan:plan,index:index,current:current,completed:completed,done:done,ids:ids,stale:stale,age:age,reportAt:reportAt};
+  }
+
+  function stepModeLabel(step) {
+    if (!step) return "";
+    return step.mode === "vacuum"
+      ? "שאיבה " + suctionLabel(step.suction) + " · " + (Number(step.repeats || 1) === 1 ? "מעבר אחד" : Number(step.repeats || 1) + " מעברים")
+      : "CleanGenius · " + (String(step.geniusMode) === "2" ? "עמוק" : "רגיל");
+  }
+
+  function reportAgeLabel(age) {
+    if (age === null) return "אין זמן דיווח מאומת";
+    if (age < 60000) return "דיווח אחרון לפני " + Math.floor(age / 1000) + " שניות";
+    if (age < 3600000) return "דיווח אחרון לפני " + Math.floor(age / 60000) + " דקות";
+    return "דיווח אחרון לפני " + Math.floor(age / 3600000) + " שעות";
+  }
+
+  function renderCleaningProgress(d) {
+    const p = cleaningProgress(d);
+    const uncertain = p.stale || (!p.run.active && !p.completed);
+    $("progressHero").classList.toggle("stale", p.stale);
+    $("activeStepDetail").textContent = stepModeLabel(p.current);
+    $("reportAge").textContent = p.reportAt ? reportAgeLabel(p.age) : "טרם התקבל דיווח על ניקוי";
+    $("progressWarning").classList.toggle("hidden", !p.stale);
+    $("progressWarning").textContent = "לא התקבל דיווח עדכני על הניקוי. אין אישור שהרובוט עדיין מנקה. רענון המסך אינו דיווח חדש מהרובוט.";
+    $("stepElapsed").textContent = p.current && p.run.active && !p.stale && (p.run.planProgress || {}).event === "plan-phase-started"
+      ? "זמן מאז תחילת השלב: " + Math.floor(p.age / 60000) + ":" + String(Math.floor(p.age / 1000) % 60).padStart(2,"0") : "";
+    $("startCleaningBtn").disabled = Boolean(p.run.active);
+    $("completedCount").textContent = p.plan.length ? p.done + " מתוך " + p.plan.length + " שלבים הושלמו" : "אין שלבים מוגדרים";
+    $("stepTimeline").innerHTML = p.plan.map(function(step, index){
+      const done = p.completed || Boolean(step.stepId && p.ids.has(step.stepId));
+      const current = index === p.index && !done;
+      const state = done ? "הושלם ✓" : current ? uncertain ? "דיווח אחרון !" : p.run.actualRun ? "מנקה עכשיו" : "מתחיל" : "בהמשך";
+      const kind = done ? "done" : current ? uncertain ? "uncertain" : "active" : "pending";
+      return '<div class="step-row ' + kind + '"' + (current ? ' aria-current="step"' : "") + '><span class="step-number">' + (index + 1) +
+        '</span><div class="step-copy"><strong>' + escapeHtml(step.name) + '</strong><small>' + escapeHtml(stepModeLabel(step)) +
+        '</small></div><span class="step-state">' + state + '</span></div>';
+    }).join("");
+    const next = p.plan.find(function(step,index){return index > p.index && !(step.stepId && p.ids.has(step.stepId));});
+    $("progressFooter").textContent = p.completed ? "התוכנית הושלמה באישור הרובוט"
+      : p.stale ? "התוכנית טרם אושרה כהושלמה"
+      : p.run.resumePending ? "ההתקדמות נשמרה. החדר שנעצר באמצע יבוצע שוב בהמשך."
+      : p.current && next ? "הבא בתור: " + next.name
+      : p.run.active ? "ממתין לדיווח הבא על התוכנית" : "התוכנית להיום · ההפעלה בהתאם להגדרות";
+  }
+
   function runSummary(d) {
-    const active = Boolean(d.runInfo && d.runInfo.active);
-    const actual = Boolean(d.runInfo && d.runInfo.actualRun);
+    const progress = cleaningProgress(d);
+    const active = Boolean(progress.run.active);
+    const actual = Boolean(progress.run.actualRun);
     const runs = d.runInfo && d.runInfo.date === (d.localTime && d.localTime.date)
       ? Number(d.runInfo.count || 0) : 0;
+    if (progress.stale) return {title:"המצב הנוכחי לא מאומת",sub:"אין דיווח עדכני המאשר שהרובוט עדיין מנקה",kind:"warn",state:"הדיווח אינו עדכני",runs:runs};
+    if (progress.current && active && actual) return {title:progress.current.name,sub:"שלב " + (progress.index + 1) + " מתוך " + progress.plan.length,kind:"ok",state:"מנקה עכשיו",runs:runs};
     if (active && actual) return {title:"הרובוט מנקה עכשיו",sub:"ההפעלה אושרה על ידי הרובוט",kind:"ok",state:"פעיל",runs:runs};
     if (active) return {title:"הניקוי בתהליך הפעלה",sub:"הפקודה נשלחה וממתינה לאישור",kind:"warn",state:"ממתין",runs:runs};
-    if (runs > 0) return {title:"הניקיון הושלם היום",sub:"הרובוט מוכן להפעלה נוספת",kind:"ok",state:"הושלם",runs:runs};
+    if (progress.completed) return {title:"הניקיון הושלם היום",sub:"התקבל אישור השלמת התוכנית",kind:"ok",state:"הושלם",runs:runs};
+    if (progress.run.resumePending) return {title:"התוכנית נעצרה",sub:"ההתקדמות נשמרה להמשך",kind:"warn",state:"ממתין להמשך",runs:runs};
+    if (runs > 0) return {title:"התוכנית אינה פעילה",sub:"לא התקבל אישור להשלמת התוכנית",kind:"warn",state:"לא פעיל",runs:runs};
     return {title:"מוכן לניקוי",sub:"לא בוצעה הפעלה היום",kind:"ok",state:"מוכן",runs:runs};
   }
 
   function currentStage(d) {
+    const p = cleaningProgress(d);
+    if (p.current) return (p.stale ? "שלב אחרון שדווח: " : "שלב ") + (p.index + 1) + " מתוך " + p.plan.length;
     return safeText(
       d.runInfo && (d.runInfo.currentStage || d.runInfo.stage || d.runInfo.phase) ||
       d.robotStatus && (d.robotStatus.currentStage || d.robotStatus.stage) ||
@@ -940,7 +1057,8 @@ export const dashboardHtml = String.raw`<!doctype html>
 
   function currentLocation(d) {
     return safeText(
-      d.runInfo && (d.runInfo.currentRoom || d.runInfo.location) ||
+      cleaningProgress(d).current && cleaningProgress(d).current.name ||
+      d.runInfo && (d.runInfo.currentRoomName || d.runInfo.currentRoom || d.runInfo.location) ||
       d.robotStatus && (d.robotStatus.currentRoom || d.robotStatus.location) ||
       d.lastDecision && d.lastDecision.location,
       "לא דווח"
@@ -1459,14 +1577,15 @@ export const dashboardHtml = String.raw`<!doctype html>
     $("connectionChip").className = "chip ok";
     $("connectionChip").innerHTML = '<i class="dot"></i> מחובר';
     $("clock").textContent = safeText(d.localTime && d.localTime.date,"") + " · " + safeText(d.localTime && d.localTime.time,"");
-    $("lastUpdated").textContent = "עודכן עכשיו";
+    $("lastUpdated").textContent = "המסך עודכן עכשיו";
     $("heroTitle").textContent = summary.title;
     $("heroSub").textContent = summary.sub + (d.runInfo && d.runInfo.lastRunAt ? " · " + fmt(d.runInfo.lastRunAt) : "");
     $("runChip").className = "chip " + summary.kind;
     $("runChip").innerHTML = '<i class="dot"></i> ' + escapeHtml(summary.state);
+    renderCleaningProgress(d);
 
     $("stageValue").textContent = currentStage(d);
-    $("stageSub").textContent = d.runInfo && d.runInfo.actualRun ? "הרובוט אישר שהניקוי פעיל" : "לפי מצב ההפעלה האחרון";
+    $("stageSub").textContent = cleaningProgress(d).stale ? "המצב הנוכחי לא מאומת" : "לפי דיווח התוכנית האחרון";
     $("locationValue").textContent = currentLocation(d);
     renderWater(d);
 
@@ -1688,3 +1807,5 @@ export const dashboardHtml = String.raw`<!doctype html>
 </script>
 </body>
 </html>`;
+
+
