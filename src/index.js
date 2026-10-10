@@ -18,6 +18,53 @@ export class PresenceState {
     this.runtimeSettings = {};
   }
 
+  async withCleaningControl(operation) {
+    const previous = this.cleaningControlTail || Promise.resolve();
+    let release;
+    this.cleaningControlTail = new Promise(resolve => { release = resolve; });
+    await previous;
+    try { return await operation(); }
+    finally { release(); }
+  }
+
+  pausePresenceMode() {
+    return this.effectiveConfig().wifeOnlyDays.includes(this.localNow().weekday) ? "wife_only" : "both";
+  }
+
+  async observeManualPause() {
+    const pause = await this.ctx.storage.get("manualPause");
+    if (!pause?.paused) return pause;
+    if (pause.stopDispatchPending || pause.stopDispatchFailed) return pause;
+    const mode = this.pausePresenceMode();
+    const people = mode === "wife_only" ? ["wife"] : ["naor", "wife"];
+    const values = await Promise.all(people.map(person => this.ctx.storage.get("presence:" + person)));
+    const allAway = values.every(person => person?.state === "away");
+    const hasHome = values.some(person => person?.state === "home");
+    // A weekday/policy change is not a fresh presence transition.
+    if (pause.presenceMode !== mode) {
+      const next = { ...pause, presenceMode: mode, seenNotAway: false };
+      await this.ctx.storage.put("manualPause", next);
+      return next;
+    }
+    if (!pause.seenNotAway && hasHome) {
+      const next = { ...pause, seenNotAway: true, conditionOffAt: new Date().toISOString() };
+      await this.ctx.storage.put("manualPause", next);
+      return next;
+    }
+    if (pause.seenNotAway && allAway) {
+      const next = { ...pause, paused: false, releasedBy: "new_presence_cycle", releasedAt: new Date().toISOString() };
+      await this.ctx.storage.put("manualPause", next);
+      const run = await this.ctx.storage.get("runInfo");
+      if (run && !run.active) await this.ctx.storage.put("runInfo", {
+        ...run, count: 0, cycleClosed: false, automaticRetryBlocked: false,
+        cycleCloseReason: null, retryBlockReason: null, presenceResetArmed: false,
+      });
+      await this.appendEvent("manual_pause_released", { reason: "new_presence_cycle", presenceMode: mode });
+      return next;
+    }
+    return pause;
+  }
+
   async loadSettings(force = false) {
     if (force || !this.runtimeSettingsLoaded) {
       this.runtimeSettings =
@@ -322,7 +369,15 @@ export class PresenceState {
       url.pathname === "/api/run-now" &&
       request.method === "POST"
     ) {
-      return Response.json(await this.forceRunNow());
+      const result = await this.forceRunNow();
+      return Response.json(result, { status: result.action === "manual_pause_requires_resume" ||
+        result.action === "manual_stop_not_confirmed" ? 409 : 200 });
+    }
+
+    if (url.pathname === "/api/resume-program" && request.method === "POST") {
+      const result = await this.forceRunNow(true);
+      const ok = result.action === "github_workflow_dispatched" || result.action === "dry_run_would_dispatch";
+      return Response.json(result, { status: ok ? 200 : result.action === "github_dispatch_failed" ? 502 : 409 });
     }
 
     if (
@@ -392,7 +447,8 @@ export class PresenceState {
       url.pathname === "/api/stop-dock" &&
       request.method === "POST"
     ) {
-      return Response.json(await this.forceStopAndDock("dashboard"));
+      const result = await this.forceStopAndDock("dashboard");
+      return Response.json(result, { status: result.action === "stop_dispatch_failed" ? 502 : 200 });
     }
 
     if (
@@ -477,6 +533,12 @@ export class PresenceState {
       return Response.json(await this.toggleSkip("widget"));
     }
 
+    if (url.pathname === "/stop" && request.method === "POST") {
+      const result = await this.forceStopAndDock("widget");
+      return Response.json(result, { status: result.action === "stop_dispatch_failed" ? 502 : 200,
+        headers: { "Cache-Control": "no-store" } });
+    }
+
     const m = url.pathname.match(/^\/presence\/(naor|wife)$/);
     if (m && request.method === "POST") {
       let body;
@@ -494,6 +556,10 @@ export class PresenceState {
   }
 
   async handleRunEvent(request) {
+    return this.withCleaningControl(() => this.handleRunEventControlled(request));
+  }
+
+  async handleRunEventControlled(request) {
     let body;
     try {
       body = await request.json();
@@ -896,6 +962,10 @@ export class PresenceState {
   }
 
   async updatePresence(person, state, source) {
+    return this.withCleaningControl(() => this.updatePresenceControlled(person, state, source));
+  }
+
+  async updatePresenceControlled(person, state, source) {
     if (!["home", "away"].includes(state)) {
       return {
         action: "invalid_presence",
@@ -928,7 +998,7 @@ export class PresenceState {
       state === "home" &&
       previousPresence?.state !== "home"
     ) {
-      returnHome = await this.stopIfActive(person);
+      returnHome = await this.stopIfActiveControlled(person);
     }
 
     const transitionedHome =
@@ -941,7 +1011,8 @@ export class PresenceState {
     // A real HOME transition after a run arms the next cycle, but does
     // NOT reopen it yet. This prevents an immediate second run while the
     // other participant is still away.
-    if (transitionedHome) {
+    const relevantForCycle = this.pausePresenceMode() !== "wife_only" || person === "wife";
+    if (transitionedHome && relevantForCycle) {
       const latestRunInfo =
         await this.ctx.storage.get("runInfo");
 
@@ -962,11 +1033,11 @@ export class PresenceState {
 
     // Only a subsequent real AWAY transition opens a fresh cycle.
     // Attempt count is reset here, not when the previous plan finishes.
-    if (transitionedAway) {
+    if (transitionedAway && relevantForCycle) {
       const latestRunInfo =
         await this.ctx.storage.get("runInfo");
 
-      if (latestRunInfo?.presenceResetArmed) {
+      if (latestRunInfo?.presenceResetArmed && !latestRunInfo.active) {
         const now = this.localNow();
 
         await this.ctx.storage.put("runInfo", {
@@ -994,7 +1065,7 @@ export class PresenceState {
     }
 
     const check =
-      await this.checkAndMaybeRun("presence_update");
+      await this.checkAndMaybeRunControlled("presence_update");
 
     return returnHome
       ? { ...check, returnHome }
@@ -1114,6 +1185,10 @@ export class PresenceState {
   }
 
   async stopIfActive(returnedBy) {
+    return this.withCleaningControl(() => this.stopIfActiveControlled(returnedBy));
+  }
+
+  async stopIfActiveControlled(returnedBy) {
     const runInfo = upgradeLegacyRunInfo(await this.ctx.storage.get("runInfo"));
 
     if (!runInfo?.active || !runInfo?.lastRunAt) {
@@ -1202,6 +1277,27 @@ export class PresenceState {
   }
 
   async forceStopAndDock(source = "dashboard") {
+    return this.withCleaningControl(() => this.forceStopAndDockControlled(source));
+  }
+
+  async forceStopAndDockControlled(source) {
+    const now = new Date().toISOString();
+    const runInfo = upgradeLegacyRunInfo(await this.ctx.storage.get("runInfo"));
+    const presenceMode = this.pausePresenceMode();
+    const people = presenceMode === "wife_only" ? ["wife"] : ["naor", "wife"];
+    const presence = await Promise.all(people.map(person => this.ctx.storage.get("presence:" + person)));
+    const pause = { paused: true, stoppedAt: now, stoppedBy: source, presenceMode,
+      seenNotAway: presence.some(person => person?.state === "home"),
+      stopDispatchPending: true, stopDispatchFailed: false };
+    // Persist the latch and revoke the executor before any network operation.
+    await this.ctx.storage.put("manualPause", pause);
+    if (runInfo) await this.ctx.storage.put("runInfo", {
+      ...runInfo, ...(runInfo.active || runInfo.resumePending ? interruptedStepState(runInfo) : {}),
+      active: false, callbackToken: null, stopRequestedAt: now, stoppedBy: source,
+      interruptedAt: now, interruptedBy: source, cycleClosed: true,
+      cycleCloseReason: "manual_stop", automaticRetryBlocked: true,
+      retryBlockReason: "manual_stop", presenceResetArmed: false,
+    });
     let github;
     try {
       github = await this.dispatchGitHub(
@@ -1209,28 +1305,23 @@ export class PresenceState {
         source
       );
     } catch (err) {
+      await this.ctx.storage.put("manualPause", { ...pause, stopDispatchPending: false, stopDispatchFailed: true });
       const result = {
         action: "stop_dispatch_failed",
         error: err?.message || String(err),
+        manualPause: true,
       };
       await this.appendEvent("dashboard_stop_failed", result);
       return result;
     }
 
-    const runInfo = await this.ctx.storage.get("runInfo");
-    if (runInfo) {
-      await this.ctx.storage.put("runInfo", {
-        ...runInfo,
-        active: false,
-        stopRequestedAt: new Date().toISOString(),
-        stoppedBy: source,
-      });
-    }
+    await this.ctx.storage.put("manualPause", { ...pause, stopDispatchPending: false });
 
     const result = {
       action: "stop_and_dock_dispatched",
       source,
       github,
+      manualPause: true,
     };
     await this.appendEvent("dashboard_stop", {});
     return result;
@@ -1923,7 +2014,14 @@ export class PresenceState {
     );
   }
 
-  async forceRunNow() {
+  async forceRunNow(explicitResume = false) {
+    return this.withCleaningControl(() => this.forceRunNowControlled(explicitResume));
+  }
+
+  async forceRunNowControlled(explicitResume = false) {
+    const pause = await this.ctx.storage.get("manualPause");
+    if (pause?.paused && !explicitResume) return { action: "manual_pause_requires_resume" };
+    if (pause?.stopDispatchPending || pause?.stopDispatchFailed) return { action: "manual_stop_not_confirmed", error: "שליחת העצירה נכשלה או טרם הסתיימה. נסה עצירה שוב לפני המשך." };
     const now = this.localNow();
     const config = this.effectiveConfig();
     const roomPlan = resolveDayPlan(
@@ -2039,6 +2137,12 @@ export class PresenceState {
       planRooms: effectiveRoomPlan.map((room) => room.id),
     });
 
+    if (pause?.paused && explicitResume) {
+      await this.ctx.storage.put("manualPause", { ...pause, paused: false,
+        releasedBy: "resume_button", releasedAt: new Date().toISOString() });
+      await this.appendEvent("manual_pause_released", { reason: "resume_button" });
+    }
+
     return {
       action: "github_workflow_dispatched",
       forced: true,
@@ -2056,6 +2160,7 @@ export class PresenceState {
       skipInfo,
       waterInfo,
       lastDecision,
+      manualPause,
     ] = await Promise.all([
       this.ctx.storage.get("presence:naor"),
       this.ctx.storage.get("presence:wife"),
@@ -2064,6 +2169,7 @@ export class PresenceState {
       this.ctx.storage.get("skipInfo"),
       this.ctx.storage.get("waterInfo"),
       this.ctx.storage.get("lastDecision"),
+      this.ctx.storage.get("manualPause"),
     ]);
 
     const config = this.effectiveConfig();
@@ -2084,6 +2190,7 @@ export class PresenceState {
       skipInfo: skipInfo ?? null,
       waterInfo: waterInfo ?? null,
       lastDecision: lastDecision ?? null,
+      manualPause: manualPause ?? null,
       config: {
         timezone: config.timezone,
         startTime: config.startTime,
@@ -2691,6 +2798,16 @@ export class PresenceState {
   }
 
   async checkAndMaybeRun(reason) {
+    return this.withCleaningControl(() => this.checkAndMaybeRunControlled(reason));
+  }
+
+  async checkAndMaybeRunControlled(reason) {
+    const pause = await this.observeManualPause();
+    if (pause?.paused) return this.saveDecision({
+      reason, action: "manual_pause", manualPause: true,
+      resumePending: Boolean((await this.ctx.storage.get("runInfo"))?.resumePending),
+      seenNotAway: pause.seenNotAway, localTime: this.localNow(),
+    });
     const state = await this.getState();
     const now = this.localNow();
     const config = this.effectiveConfig();
@@ -3045,8 +3162,8 @@ export default {
       webhookToken === env.WEBHOOK_TOKEN;
 
     const widgetAuthorized =
-      request.method === "GET" &&
-      url.pathname === "/status" &&
+      ((request.method === "GET" && url.pathname === "/status") ||
+       (request.method === "POST" && url.pathname === "/stop")) &&
       Boolean(env.WIDGET_TOKEN) &&
       widgetToken === env.WIDGET_TOKEN;
 

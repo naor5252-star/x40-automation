@@ -23,6 +23,7 @@ function israelTime() {
 }
 
 function returnedLabel() {
+  if (["widget", "dashboard", "manual"].includes(returnedBy)) return "התבקשה עצירה ידנית של התוכנית";
   if (returnedBy === "naor") return "נאור חזר הביתה";
   if (returnedBy === "wife") return "בת הזוג חזרה הביתה";
   return "אחד מכם חזר הביתה";
@@ -108,6 +109,11 @@ if (stopResult.sent || dockResult.sent) {
       `🏠 ${returnedLabel()}.`,
       "🛑 בוצעה בקשה לעצור את תרחיש הניקיון.",
       "🔌 בוצעה בקשה להחזיר את Dreame X40 לעמדת הטעינה.",
+      ...(["widget", "dashboard", "manual"].includes(returnedBy) ? [
+        "⏸ ההתחלה האוטומטית חסומה.",
+        "להמשך לחץ ״המשך תוכנית״ בממשק, או המתן למעבר חדש מבבית לבחוץ של מי שנדרש לפי היום.",
+        "תשובות כן/לא להודעה זו אינן מפעילות את הרובוט.",
+      ] : []),
       ...(stopResult.noAck || dockResult.noAck
         ? ["ℹ️ Dreame לא החזיר ACK מלא, אבל פקודות העצירה והחזרה נשלחו."]
         : []),

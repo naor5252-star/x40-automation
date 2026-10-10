@@ -579,6 +579,7 @@ export const dashboardHtml = String.raw`<!doctype html>
 
         <div class="action-grid section">
           <button id="startCleaningBtn" class="primary-action" onclick="runNow()">▶ התחל ניקוי</button>
+          <button id="resumeProgramBtn" class="primary-action hidden" onclick="resumeProgram()">▶ המשך תוכנית</button>
           <button id="skipBtn" class="btn warn" onclick="toggleSkip()">דלג היום</button>
           <button class="btn soft" onclick="manualCheck()">בדוק תנאים</button>
         </div>
@@ -1010,6 +1011,11 @@ export const dashboardHtml = String.raw`<!doctype html>
     $("stepElapsed").textContent = p.current && p.run.active && !p.stale && (p.run.planProgress || {}).event === "plan-phase-started"
       ? "זמן מאז תחילת השלב: " + Math.floor(p.age / 60000) + ":" + String(Math.floor(p.age / 1000) % 60).padStart(2,"0") : "";
     $("startCleaningBtn").disabled = Boolean(p.run.active);
+    const paused = Boolean(d.manualPause && d.manualPause.paused);
+    $("startCleaningBtn").classList.toggle("hidden", paused);
+    $("resumeProgramBtn").classList.toggle("hidden", !paused && !p.run.resumePending);
+    $("resumeProgramBtn").disabled = Boolean(p.run.active || (d.manualPause &&
+      (d.manualPause.stopDispatchPending || d.manualPause.stopDispatchFailed)));
     $("completedCount").textContent = p.plan.length ? p.done + " מתוך " + p.plan.length + " שלבים הושלמו" : "אין שלבים מוגדרים";
     $("stepTimeline").innerHTML = p.plan.map(function(step, index){
       const done = p.completed || Boolean(step.stepId && p.ids.has(step.stepId));
@@ -1026,6 +1032,9 @@ export const dashboardHtml = String.raw`<!doctype html>
       : p.run.resumePending ? "ההתקדמות נשמרה. החדר שנעצר באמצע יבוצע שוב בהמשך."
       : p.current && next ? "הבא בתור: " + next.name
       : p.run.active ? "ממתין לדיווח הבא על התוכנית" : "התוכנית להיום · ההפעלה בהתאם להגדרות";
+    if (paused) $("progressFooter").textContent = d.manualPause.stopDispatchFailed
+      ? "שליחת העצירה נכשלה. ההתחלה האוטומטית חסומה; לחץ עצור שוב."
+      : "נעצר ידנית. המשך באמצעות הכפתור, או אחרי שתנאי הנוכחות הנדרש יתבטל ויתקיים מחדש. שינוי שעה או תאריך אינו מבטל עצירה.";
   }
 
   function runSummary(d) {
@@ -1034,6 +1043,10 @@ export const dashboardHtml = String.raw`<!doctype html>
     const actual = Boolean(progress.run.actualRun);
     const runs = d.runInfo && d.runInfo.date === (d.localTime && d.localTime.date)
       ? Number(d.runInfo.count || 0) : 0;
+    if (d.manualPause && d.manualPause.paused) return {
+      title: d.manualPause.stopDispatchFailed ? "שליחת העצירה נכשלה" : "התוכנית נעצרה ידנית",
+      sub: d.manualPause.stopDispatchFailed ? "התחלה אוטומטית חסומה. נסה עצירה שוב." : "ההתקדמות נשמרה. ההתחלה האוטומטית חסומה",
+      kind:"warn", state: d.manualPause.stopDispatchPending ? "שולח עצירה" : "ממתין להמשך", runs:runs };
     if (progress.stale) return {title:"המצב הנוכחי לא מאומת",sub:"אין דיווח עדכני המאשר שהרובוט עדיין מנקה",kind:"warn",state:"הדיווח אינו עדכני",runs:runs};
     if (progress.current && active && actual) return {title:progress.current.name,sub:"שלב " + (progress.index + 1) + " מתוך " + progress.plan.length,kind:"ok",state:"מנקה עכשיו",runs:runs};
     if (active && actual) return {title:"הרובוט מנקה עכשיו",sub:"ההפעלה אושרה על ידי הרובוט",kind:"ok",state:"פעיל",runs:runs};
@@ -1683,6 +1696,15 @@ export const dashboardHtml = String.raw`<!doctype html>
   async function stopDock() {
     if (!confirm("לעצור את הניקוי ולהחזיר את הרובוט לעמדה?")) return;
     await doAction("/api/stop-dock","עוצר ומחזיר לעמדה");
+  }
+  async function resumeProgram() {
+    if (!confirm("להמשיך מהשלב שנשמר? ביום חדש תופעל התוכנית של היום. הפעולה עוקפת נוכחות, שעות ודילוג יומי; Dry Run עדיין מכובד.")) return;
+    const button = $("resumeProgramBtn");
+    button.disabled = true;
+    try {
+      await doAction("/api/resume-program","ממשיך תוכנית");
+      await refresh(false);
+    } finally { button.disabled = Boolean(data && data.runInfo && data.runInfo.active); }
   }
   async function toggleSkip() { await doAction("/api/skip-toggle","מעדכן דילוג יומי"); }
   async function manualCheck() { await doAction("/api/check","בודק את תנאי ההפעלה"); }
